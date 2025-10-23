@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.34.1
+
+### Patch Changes
+
+- f91769b: Fixed proto naming issue - RPC >>> Rpc
+- ee1bb2f: Support Feature Flags default values
+
 ## [3.34.0]
 
 - Cline Teams is now free through 2025 for unlimited users. Includes Jetbrains, RBAC, centralized billing and more.
