@@ -2,8 +2,6 @@
 
 ## 3.34.1
 
-### Patch Changes
-
 - f91769b: Fixed proto naming issue - RPC >>> Rpc
 - ee1bb2f: Support Feature Flags default values
 
