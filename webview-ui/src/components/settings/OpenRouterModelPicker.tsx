@@ -169,23 +169,28 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup, 
 	}, [searchableItems, searchTerm, fuse, favoritedModelIds])
 
 	const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-		if (!isDropdownVisible) {
-			return
-		}
-
 		switch (event.key) {
 			case "ArrowDown":
-				event.preventDefault()
-				setSelectedIndex((prev) => (prev < modelSearchResults.length - 1 ? prev + 1 : prev))
+				if (isDropdownVisible) {
+					event.preventDefault()
+					setSelectedIndex((prev) => (prev < modelSearchResults.length - 1 ? prev + 1 : prev))
+				}
 				break
 			case "ArrowUp":
-				event.preventDefault()
-				setSelectedIndex((prev) => (prev > 0 ? prev - 1 : prev))
+				if (isDropdownVisible) {
+					event.preventDefault()
+					setSelectedIndex((prev) => (prev > 0 ? prev - 1 : prev))
+				}
 				break
 			case "Enter":
 				event.preventDefault()
-				if (selectedIndex >= 0 && selectedIndex < modelSearchResults.length) {
+				if (isDropdownVisible && selectedIndex >= 0 && selectedIndex < modelSearchResults.length) {
+					// User selected from dropdown
 					handleModelChange(modelSearchResults[selectedIndex].id)
+					setIsDropdownVisible(false)
+				} else {
+					// User typed a custom model ID (e.g., @preset/something)
+					handleModelChange(searchTerm)
 					setIsDropdownVisible(false)
 				}
 				break
@@ -198,11 +203,18 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup, 
 
 	const hasInfo = useMemo(() => {
 		try {
+			if (searchTerm.startsWith("@preset/")) {
+				return false // Preset models don't have model info
+			}
 			return modelIds.some((id) => id.toLowerCase() === searchTerm.toLowerCase())
 		} catch {
 			return false
 		}
 	}, [modelIds, searchTerm])
+
+	const isPresetModel = useMemo(() => {
+		return searchTerm.startsWith("@preset/")
+	}, [searchTerm])
 
 	useEffect(() => {
 		setSelectedIndex(-1)
@@ -271,6 +283,11 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup, 
 				<DropdownWrapper ref={dropdownRef}>
 					<VSCodeTextField
 						id="model-search"
+						onBlur={() => {
+							if (searchTerm !== selectedModelId) {
+								handleModelChange(searchTerm)
+							}
+						}}
 						onFocus={() => setIsDropdownVisible(true)}
 						onInput={(e) => {
 							setSearchTerm((e.target as HTMLInputElement)?.value.toLowerCase() || "")
@@ -358,6 +375,20 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup, 
 
 					<ModelInfoView isPopup={isPopup} modelInfo={selectedModelInfo} selectedModelId={selectedModelId} />
 				</>
+			) : isPresetModel ? (
+				<p
+					style={{
+						fontSize: "12px",
+						marginTop: 0,
+						color: "var(--vscode-descriptionForeground)",
+					}}>
+					Using OpenRouter preset: <strong>{searchTerm}</strong>. Preset models reference your configured model
+					preferences on{" "}
+					<VSCodeLink href="https://openrouter.ai/settings/presets" style={{ display: "inline", fontSize: "inherit" }}>
+						OpenRouter
+					</VSCodeLink>
+					. Model info and pricing will depend on your preset configuration.
+				</p>
 			) : (
 				<p
 					style={{
@@ -375,7 +406,8 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup, 
 						style={{ display: "inline", fontSize: "inherit" }}>
 						anthropic/claude-sonnet-4.5.
 					</VSCodeLink>
-					You can also try searching "free" for no-cost options currently available.
+					You can also try searching "free" for no-cost options currently available. You can also enter{" "}
+					<strong>@preset/your-preset-name</strong> to use an OpenRouter preset.
 				</p>
 			)}
 		</div>
