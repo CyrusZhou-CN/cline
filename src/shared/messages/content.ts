@@ -1,13 +1,9 @@
 import { Anthropic } from "@anthropic-ai/sdk"
+import { ClineMessageMetricsInfo, ClineMessageModelInfo } from "./metrics"
 
-type ClinePromptInputContent = string
+export type ClinePromptInputContent = string
 
-type ClineMessageRole = "user" | "assistant"
-
-export interface ClineMessageModelInfo {
-	modelId: string
-	providerId: string
-}
+export type ClineMessageRole = "user" | "assistant"
 
 export interface ClineReasoningDetailParam {
 	type: "reasoning.text" | string
@@ -29,7 +25,7 @@ export const REASONING_DETAILS_PROVIDERS = ["cline", "openrouter"]
  * This ensures backward compatibility where the messages were stored in Anthropic format with additional
  * fields unknown to Anthropic SDK.
  */
-export interface ClineTextContentBlock extends Anthropic.TextBlockParam {
+export interface ClineTextContentBlock extends Anthropic.TextBlockParam, ClineSharedMessageParam {
 	// reasoning_details only exists for providers listed in REASONING_DETAILS_PROVIDERS
 	reasoning_details?: ClineReasoningDetailParam[]
 	// Thought Signature associates with Gemini
@@ -46,12 +42,16 @@ export interface ClineUserToolResultContentBlock extends Anthropic.ToolResultBlo
  * Assistant only content types
  */
 export interface ClineAssistantToolUseBlock extends Anthropic.ToolUseBlockParam, ClineSharedMessageParam {
+	// reasoning_details only exists for providers listed in REASONING_DETAILS_PROVIDERS
+	reasoning_details?: unknown[] | ClineReasoningDetailParam[]
 	// Thought Signature associates with Gemini
 	signature?: string
 }
 
 export interface ClineAssistantThinkingBlock extends Anthropic.ThinkingBlock, ClineSharedMessageParam {
-	summary?: unknown[]
+	// The summary items returned by OpenAI response API
+	// The reasoning details that will be moved to the text block when finalized
+	summary?: unknown[] | ClineReasoningDetailParam[]
 }
 
 export interface ClineAssistantRedactedThinkingBlock extends Anthropic.RedactedThinkingBlockParam, ClineSharedMessageParam {}
@@ -93,6 +93,11 @@ export interface ClineStorageMessage extends Anthropic.MessageParam {
 	 * MUST be removed before sending message to any LLM provider.
 	 */
 	modelInfo?: ClineMessageModelInfo
+	/**
+	 * LLM operational and performance metrics for this message
+	 * Includes token counts, costs.
+	 */
+	metrics?: ClineMessageMetricsInfo
 }
 
 /**
@@ -110,9 +115,14 @@ export function convertClineStorageToAnthropicMessage(
 		return { role, content }
 	}
 
+	// Removes thinking block that has no signature (invalid thinking block that's incompatible with Anthropic API)
+	const filteredContent = content.filter((b) => b.type !== "thinking" || !!b.signature)
+
 	// Handle array content - strip Cline-specific fields for non-reasoning_details providers
 	const shouldCleanContent = !REASONING_DETAILS_PROVIDERS.includes(provider)
-	const cleanedContent = shouldCleanContent ? content.map(cleanContentBlock) : (content as Anthropic.MessageParam["content"])
+	const cleanedContent = shouldCleanContent
+		? filteredContent.map(cleanContentBlock)
+		: (filteredContent as Anthropic.MessageParam["content"])
 
 	return { role, content: cleanedContent }
 }
@@ -121,12 +131,25 @@ export function convertClineStorageToAnthropicMessage(
  * Clean a content block by removing Cline-specific fields and returning only Anthropic-compatible fields
  */
 export function cleanContentBlock(block: ClineContent): Anthropic.ContentBlock {
-	// Remove Cline-specific fields: reasoning_details, call_id, summary
-	if ("reasoning_details" in block || "call_id" in block || "summary" in block) {
-		// biome-ignore lint/correctness/noUnusedVariables: intentional destructuring to remove properties
-		const { reasoning_details, call_id, summary, ...cleanBlock } = block as any
-		return cleanBlock as Anthropic.ContentBlock
+	// Fast path: if no Cline-specific fields exist, return as-is
+	const hasClineFields =
+		"reasoning_details" in block ||
+		"call_id" in block ||
+		"summary" in block ||
+		(block.type !== "thinking" && "signature" in block)
+
+	if (!hasClineFields) {
+		return block as Anthropic.ContentBlock
 	}
 
-	return block as Anthropic.ContentBlock
+	// Removes Cline-specific fields & the signature field that's added for Gemini.
+	// biome-ignore lint/correctness/noUnusedVariables: intentional destructuring to remove properties
+	const { reasoning_details, call_id, summary, ...rest } = block as any
+
+	// Remove signature from non-thinking blocks that were added for Gemini
+	if (block.type !== "thinking" && rest.signature) {
+		rest.signature = undefined
+	}
+
+	return rest satisfies Anthropic.ContentBlock
 }

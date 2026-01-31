@@ -1,11 +1,32 @@
 import { StringRequest } from "@shared/proto/cline/common"
-import { RuleFileRequest } from "@shared/proto/index.cline"
-import { InfoIcon, PenIcon, Trash2Icon } from "lucide-react"
+import { DeleteSkillRequest, RuleFileRequest } from "@shared/proto/index.cline"
+import { REMOTE_URI_SCHEME } from "@shared/remote-config/constants"
+import { EyeIcon, InfoIcon, PenIcon, Trash2Icon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { cn } from "@/lib/utils"
 import { FileServiceClient } from "@/services/grpc-client"
+
+function isWin32Path(filePath: string): boolean {
+	return /^[a-zA-Z]:\\/.test(filePath)
+}
+
+function splitPath(filePath: string): string[] {
+	const win32 = isWin32Path(filePath)
+	return filePath.split(win32 ? "\\" : "/")
+}
+
+function getDisplayNameFromPath(filePath: string): string {
+	const parts = splitPath(filePath)
+	return parts.at(-1) || filePath
+}
+
+function getSkillDisplayNameFromSkillMdPath(filePath: string): string {
+	const parts = splitPath(filePath)
+	const displayName = getDisplayNameFromPath(filePath)
+	// Path is like /path/to/skill-name/SKILL.md, we want skill-name
+	return parts.at(-2) || displayName
+}
 
 const RuleRow: React.FC<{
 	rulePath: string
@@ -15,14 +36,13 @@ const RuleRow: React.FC<{
 	toggleRule: (rulePath: string, enabled: boolean) => void
 	isRemote?: boolean
 	alwaysEnabled?: boolean
-}> = ({ rulePath, enabled, isGlobal, toggleRule, ruleType, isRemote = false, alwaysEnabled = false }) => {
-	// Check if the path type is Windows
-	const win32Path = /^[a-zA-Z]:\\/.test(rulePath)
-	// Get the filename from the path for display
-	const displayName = rulePath.split(win32Path ? "\\" : "/").pop() || rulePath
+	onDeleteSkill?: () => void
+}> = ({ rulePath, enabled, isGlobal, toggleRule, ruleType, isRemote = false, alwaysEnabled = false, onDeleteSkill }) => {
+	const displayName = getDisplayNameFromPath(rulePath)
+	const skillDisplayName = getSkillDisplayNameFromSkillMdPath(rulePath)
 
 	// For remote rules, the rulePath is already the display name
-	const finalDisplayName = isRemote ? rulePath : displayName
+	const finalDisplayName = isRemote ? rulePath : ruleType === "skill" ? skillDisplayName : displayName
 	const isDisabled = isRemote && alwaysEnabled
 
 	const getRuleTypeIcon = () => {
@@ -81,27 +101,37 @@ const RuleRow: React.FC<{
 	}
 
 	const handleEditClick = () => {
-		FileServiceClient.openFile(StringRequest.create({ value: rulePath })).catch((err) =>
+		// For remote rules, use the special remote:// URI format
+		const filePath = isRemote ? `${REMOTE_URI_SCHEME}${ruleType === "workflow" ? "workflow" : "rule"}/${rulePath}` : rulePath
+		FileServiceClient.openFile(StringRequest.create({ value: filePath })).catch((err) =>
 			console.error("Failed to open file:", err),
 		)
 	}
 
 	const handleDeleteClick = () => {
-		FileServiceClient.deleteRuleFile(
-			RuleFileRequest.create({
-				rulePath,
-				isGlobal,
-				type: ruleType || "cline",
-			}),
-		).catch((err) => console.error("Failed to delete rule file:", err))
+		if (ruleType === "skill") {
+			FileServiceClient.deleteSkillFile(
+				DeleteSkillRequest.create({
+					skillPath: rulePath,
+					isGlobal,
+				}),
+			)
+				.then(() => onDeleteSkill?.())
+				.catch((err) => console.error("Failed to delete skill:", err))
+		} else {
+			FileServiceClient.deleteRuleFile(
+				RuleFileRequest.create({
+					rulePath,
+					isGlobal,
+					type: ruleType || "cline",
+				}),
+			).catch((err) => console.error("Failed to delete rule file:", err))
+		}
 	}
 
 	return (
 		<div className="mb-2.5">
-			<div
-				className={cn("flex items-center px-2 py-4 rounded bg-text-block-background max-h-4", {
-					"opacity-60": isDisabled,
-				})}>
+			<div className="flex items-center px-2 py-4 rounded bg-text-block-background max-h-4">
 				<span className="flex-1 overflow-hidden break-all whitespace-normal flex items-center mr-1" title={rulePath}>
 					{getRuleTypeIcon() && <span className="mr-1.5">{getRuleTypeIcon()}</span>}
 					<span className="ph-no-capture">{finalDisplayName}</span>
@@ -122,19 +152,18 @@ const RuleRow: React.FC<{
 					<Switch
 						checked={enabled}
 						className="mx-1"
-						disabled={isRemote}
+						disabled={isDisabled}
 						key={rulePath}
 						onClick={() => toggleRule(rulePath, !enabled)}
 						title={isDisabled ? "This rule is required and cannot be disabled" : undefined}
 					/>
 					<Button
-						aria-label="Edit rule file"
-						disabled={isRemote}
+						aria-label={isRemote ? "View rule file" : "Edit rule file"}
 						onClick={handleEditClick}
 						size="xs"
-						title="Edit rule file"
+						title={isRemote ? "View rule file (read-only)" : "Edit rule file"}
 						variant="icon">
-						<PenIcon />
+						{isRemote ? <EyeIcon /> : <PenIcon />}
 					</Button>
 					<Button
 						aria-label="Delete rule file"

@@ -1,6 +1,7 @@
 import axios from "axios"
 import ogs from "open-graph-scraper"
-import { getAxiosSettings } from "@/shared/net"
+import { fetch, getAxiosSettings } from "@/shared/net"
+import { Logger } from "@/shared/services/Logger"
 
 export interface OpenGraphData {
 	title?: string
@@ -28,6 +29,7 @@ export async function fetchOpenGraphData(url: string): Promise<OpenGraphData> {
 			fetchOptions: {
 				redirect: "follow", // Follow redirects
 			} as any,
+			fetch, // Use configured fetch with proxy support
 		}
 
 		const { result } = await ogs(options)
@@ -46,7 +48,7 @@ export async function fetchOpenGraphData(url: string): Promise<OpenGraphData> {
 				const baseUrl = `${urlObj.protocol}//${urlObj.hostname}`
 				imageUrl = new URL(imageUrl, baseUrl).href
 			} catch (error) {
-				console.error(`Error converting relative URL to absolute: ${imageUrl}`, error)
+				Logger.error(`Error converting relative URL to absolute: ${imageUrl}`, error)
 			}
 		}
 

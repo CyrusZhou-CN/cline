@@ -8,6 +8,7 @@ import {
 	fromProtobufOpenAiCompatibleModelInfo,
 } from "@shared/proto-conversions/models/typeConversion"
 import { buildApiHandler } from "@/core/api"
+import { Logger } from "@/shared/services/Logger"
 import type { Controller } from "../index"
 
 /**
@@ -22,7 +23,7 @@ export async function updateApiConfigurationProto(
 ): Promise<Empty> {
 	try {
 		if (!request.apiConfiguration) {
-			console.log("[APICONFIG: updateApiConfigurationProto] API configuration is required")
+			Logger.log("[APICONFIG: updateApiConfigurationProto] API configuration is required")
 			throw new Error("API configuration is required")
 		}
 
@@ -110,6 +111,8 @@ export async function updateApiConfigurationProto(
 			actModeAihubmixModelInfo: protoApiConfiguration.actModeAihubmixModelInfo
 				? fromProtobufOpenAiCompatibleModelInfo(protoApiConfiguration.actModeAihubmixModelInfo)
 				: undefined,
+			geminiPlanModeThinkingLevel: protoApiConfiguration.geminiPlanModeThinkingLevel,
+			geminiActModeThinkingLevel: protoApiConfiguration.geminiActModeThinkingLevel,
 		}
 
 		// Update the API configuration in storage
@@ -129,7 +132,7 @@ export async function updateApiConfigurationProto(
 
 		return Empty.create()
 	} catch (error) {
-		console.error(`Failed to update API configuration: ${error}`)
+		Logger.error(`Failed to update API configuration: ${error}`)
 		throw error
 	}
 }

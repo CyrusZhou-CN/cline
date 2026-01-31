@@ -24,6 +24,10 @@ export const toolParamNames = [
 	"url",
 	"coordinate",
 	"text",
+	"query",
+	"allowed_domains",
+	"blocked_domains",
+	"prompt",
 	"server_name",
 	"tool_name",
 	"arguments",
@@ -42,6 +46,9 @@ export const toolParamNames = [
 	"task_progress",
 	"timeout",
 	"input",
+	"from_ref",
+	"to_ref",
+	"skill_name",
 ] as const
 
 export type ToolParamName = (typeof toolParamNames)[number]

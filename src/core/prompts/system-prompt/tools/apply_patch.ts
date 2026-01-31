@@ -1,5 +1,6 @@
 import { ModelFamily } from "@/shared/prompts"
 import { ClineDefaultTool } from "@/shared/tools"
+import { isGPT5ModelFamily } from "@/utils/model-utils"
 import type { ClineToolSpec } from "../spec"
 import { TASK_PROGRESS_PARAMETER } from "../types"
 
@@ -30,7 +31,9 @@ EOF
 Where [YOUR_PATCH] is the actual content of your patch, specified in the following V4A diff format.
 
 *** [ACTION] File: [path/to/file] -> ACTION can be one of Add, Update, or Delete. 
-For each snippet of code that needs to be changed, repeat the following:
+
+In a Add File section, every line of the new file (including blank/empty lines) MUST start with a \`+\` prefix. Do not include any unprefixed lines inside an Add section
+In a Update/Delete section, repeat the following for each snippet of code that needs to be changed:
 [context_before] -> See below for further instructions on context.
 - [old_code] -> Precede the old code with a minus sign.
 + [new_code] -> Precede the new, replacement code with a plus sign.
@@ -78,7 +81,7 @@ const NATIVE_GPT_5: ClineToolSpec = {
 	id: ClineDefaultTool.APPLY_PATCH,
 	name: "apply_patch",
 	description: APPLY_PATCH_TOOL_DESC,
-	contextRequirements: (context) => context.providerInfo.model.id.includes("gpt-5"),
+	contextRequirements: (context) => isGPT5ModelFamily(context.providerInfo.model.id),
 	parameters: [
 		{
 			name: "input",

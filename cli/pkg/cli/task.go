@@ -20,13 +20,14 @@ import (
 
 // TaskOptions contains options for creating a task
 type TaskOptions struct {
-	Images   []string
-	Files    []string
-	Mode     string
-	Settings []string
-	Yolo     bool
-	Address  string
-	Verbose  bool
+	Images     []string
+	Files      []string
+	Mode       string
+	Settings   []string
+	Yolo       bool
+	Address    string
+	Verbose    bool
+	Workspaces []string
 }
 
 func NewTaskCommand() *cobra.Command {
@@ -79,7 +80,7 @@ func ensureTaskManager(ctx context.Context, address string) error {
 		}
 
 		// Always set the instance we're using as the default
-		registry := global.Clients.GetRegistry()
+		registry := global.Instances.GetRegistry()
 		if err := registry.SetDefaultInstance(instanceAddress); err != nil {
 			// Log warning but don't fail - this is not critical
 			fmt.Printf("Warning: failed to set default instance: %v\n", err)
@@ -90,10 +91,10 @@ func ensureTaskManager(ctx context.Context, address string) error {
 
 // ensureInstanceAtAddress ensures an instance exists at the given address
 func ensureInstanceAtAddress(ctx context.Context, address string) error {
-	if global.Clients == nil {
+	if global.Instances == nil {
 		return fmt.Errorf("global clients not initialized")
 	}
-	return global.Clients.EnsureInstanceAtAddress(ctx, address)
+	return global.Instances.EnsureInstanceAtAddress(ctx, address)
 }
 
 func newTaskNewCommand() *cobra.Command {
@@ -116,7 +117,7 @@ func newTaskNewCommand() *cobra.Command {
 			ctx := cmd.Context()
 
 			// Check if an instance exists when no address specified
-			if address == "" && global.Clients.GetRegistry().GetDefaultInstance() == "" {
+			if address == "" && global.Instances.GetRegistry().GetDefaultInstance() == "" {
 				fmt.Println("No instances available for creating tasks")
 				return nil
 			}
@@ -229,7 +230,7 @@ func newTaskSendCommand() *cobra.Command {
 			ctx := cmd.Context()
 
 			// Check if an instance exists when no address specified
-			if address == "" && global.Clients.GetRegistry().GetDefaultInstance() == "" {
+			if address == "" && global.Instances.GetRegistry().GetDefaultInstance() == "" {
 				fmt.Println("No instances available for sending messages")
 				return nil
 			}
@@ -394,7 +395,7 @@ func newTaskViewCommand() *cobra.Command {
 				return taskManager.FollowConversation(ctx, taskManager.GetCurrentInstance(), false)
 			} else if followComplete {
 				// Follow until completion
-				return taskManager.FollowConversationUntilCompletion(ctx)
+				return taskManager.FollowConversationUntilCompletion(ctx, task.DefaultFollowOptions())
 			} else {
 				// Default: show snapshot
 				return taskManager.ShowConversation(ctx)
@@ -619,11 +620,6 @@ func CleanupTaskManager() {
 	}
 }
 
-// NewTaskManagerForAddress is an exported wrapper around task.NewManagerForAddress
-func NewTaskManagerForAddress(ctx context.Context, address string) (*task.Manager, error) {
-	return task.NewManagerForAddress(ctx, address)
-}
-
 // CreateAndFollowTask creates a new task and immediately follows it in interactive mode
 // This is used by the root command to provide a streamlined UX
 func CreateAndFollowTask(ctx context.Context, prompt string, opts TaskOptions) error {
@@ -668,7 +664,10 @@ func CreateAndFollowTask(ctx context.Context, prompt string, opts TaskOptions) e
 	// If yolo mode is enabled, follow until completion (non-interactive)
 	// Otherwise, follow in interactive mode
 	if opts.Yolo {
-		return taskManager.FollowConversationUntilCompletion(ctx)
+		// Skip active task check since we just created the task
+		return taskManager.FollowConversationUntilCompletion(ctx, task.FollowOptions{
+			SkipActiveTaskCheck: true,
+		})
 	} else {
 		return taskManager.FollowConversation(ctx, taskManager.GetCurrentInstance(), true)
 	}

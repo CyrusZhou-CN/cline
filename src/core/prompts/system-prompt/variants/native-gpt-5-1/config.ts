@@ -1,5 +1,6 @@
-import { isGPT51Model, isNextGenModelProvider } from "@utils/model-utils"
+import { isGPT51Model, isGPT52Model, isNextGenModelProvider } from "@utils/model-utils"
 import { ModelFamily } from "@/shared/prompts"
+import { Logger } from "@/shared/services/Logger"
 import { ClineDefaultTool } from "@/shared/tools"
 import { SystemPromptSection } from "../../templates/placeholders"
 import { createVariant } from "../variant-builder"
@@ -9,16 +10,16 @@ import { GPT_5_1_TEMPLATE_OVERRIDES } from "./template"
 
 // Type-safe variant configuration using the builder pattern
 export const config = createVariant(ModelFamily.NATIVE_GPT_5_1)
-	.description("Prompt tailored to GPT-5-1 with native tool use support")
+	.description("Prompt tailored to GPT-5.1 and GPT-5.2 with native tool use support")
 	.version(1)
-	.tags("gpt", "gpt-5-1", "advanced", "production", "native_tools")
+	.tags("gpt", "gpt-5-1", "gpt-5-2", "advanced", "production", "native_tools")
 	.labels({
 		stable: 1,
 		production: 1,
 		advanced: 1,
 		use_native_tools: 1,
 	})
-	// Match GPT-5-1 models from providers that support native tools
+	// Match GPT-5.1 and GPT-5.2 models from providers that support native tools
 	.matcher((context) => {
 		if (!context.enableNativeToolCalls) {
 			return false
@@ -26,8 +27,14 @@ export const config = createVariant(ModelFamily.NATIVE_GPT_5_1)
 		const providerInfo = context.providerInfo
 		const modelId = providerInfo.model.id
 
-		// gpt-5-1-chat models do not support native tool use
-		return isGPT51Model(modelId) && !modelId.includes("chat") && isNextGenModelProvider(providerInfo)
+		// Chat variants do not support native tool use
+		if (modelId.includes("chat")) {
+			return false
+		}
+
+		// GPT-5.1 and GPT-5.2 models (including codex variants) use extended reasoning
+		// and require reasoning blocks before function calls
+		return (isGPT51Model(modelId) || isGPT52Model(modelId)) && isNextGenModelProvider(providerInfo)
 	})
 	.template(GPT_5_1_TEMPLATE_OVERRIDES.BASE)
 	.components(
@@ -42,19 +49,19 @@ export const config = createVariant(ModelFamily.NATIVE_GPT_5_1)
 		SystemPromptSection.SYSTEM_INFO,
 		SystemPromptSection.OBJECTIVE,
 		SystemPromptSection.USER_INSTRUCTIONS,
+		SystemPromptSection.SKILLS,
 	)
 	.tools(
 		ClineDefaultTool.BASH,
 		ClineDefaultTool.FILE_READ,
 		// Should disable FILE_NEW and FILE_EDIT when enabled
-		// ClineDefaultTool.APPLY_PATCH,
-		ClineDefaultTool.FILE_NEW,
-		ClineDefaultTool.FILE_EDIT,
+		ClineDefaultTool.APPLY_PATCH,
 		ClineDefaultTool.SEARCH,
 		ClineDefaultTool.LIST_FILES,
 		ClineDefaultTool.LIST_CODE_DEF,
 		ClineDefaultTool.BROWSER,
 		ClineDefaultTool.WEB_FETCH,
+		ClineDefaultTool.WEB_SEARCH,
 		ClineDefaultTool.MCP_ACCESS,
 		ClineDefaultTool.ASK,
 		ClineDefaultTool.ATTEMPT,
@@ -63,9 +70,11 @@ export const config = createVariant(ModelFamily.NATIVE_GPT_5_1)
 		ClineDefaultTool.ACT_MODE,
 		ClineDefaultTool.MCP_DOCS,
 		ClineDefaultTool.TODO,
+		ClineDefaultTool.GENERATE_EXPLANATION,
+		ClineDefaultTool.USE_SKILL,
 	)
 	.placeholders({
-		MODEL_FAMILY: ModelFamily.NATIVE_GPT_5,
+		MODEL_FAMILY: ModelFamily.NATIVE_GPT_5_1,
 	})
 	.config({})
 	// Override components with custom templates from overrides.ts
@@ -78,14 +87,14 @@ export const config = createVariant(ModelFamily.NATIVE_GPT_5_1)
 	.build()
 
 // Compile-time validation
-const validationResult = validateVariant({ ...config, id: ModelFamily.NATIVE_GPT_5 }, { strict: true })
+const validationResult = validateVariant({ ...config, id: ModelFamily.NATIVE_GPT_5_1 }, { strict: true })
 if (!validationResult.isValid) {
-	console.error("GPT-5-1 variant configuration validation failed:", validationResult.errors)
+	Logger.error("GPT-5-1 variant configuration validation failed:", validationResult.errors)
 	throw new Error(`Invalid GPT-5-1 variant configuration: ${validationResult.errors.join(", ")}`)
 }
 
 if (validationResult.warnings.length > 0) {
-	console.warn("GPT-5-1 variant configuration warnings:", validationResult.warnings)
+	Logger.warn("GPT-5-1 variant configuration warnings:", validationResult.warnings)
 }
 
 // Export type information for better IDE support

@@ -1,7 +1,6 @@
 import { DEFAULT_AUTO_APPROVAL_SETTINGS } from "@shared/AutoApprovalSettings"
 import { findLastIndex } from "@shared/array"
 import { DEFAULT_BROWSER_SETTINGS } from "@shared/BrowserSettings"
-import { ClineFeatureSetting } from "@shared/ClineFeatureSetting"
 import { DEFAULT_DICTATION_SETTINGS, DictationSettings } from "@shared/DictationSettings"
 import { DEFAULT_PLATFORM, type ExtensionState } from "@shared/ExtensionMessage"
 import { DEFAULT_FOCUS_CHAIN_SETTINGS } from "@shared/FocusChainSettings"
@@ -15,7 +14,6 @@ import { convertProtoMcpServersToMcpServers } from "@shared/proto-conversions/mc
 import { fromProtobufModels } from "@shared/proto-conversions/models/typeConversion"
 import type React from "react"
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react"
-import { Environment } from "../../../src/config"
 import {
 	basetenDefaultModelId,
 	basetenModels,
@@ -27,6 +25,7 @@ import {
 	requestyDefaultModelId,
 	requestyDefaultModelInfo,
 } from "../../../src/shared/api"
+import { Environment } from "../../../src/shared/config-types"
 import type { McpMarketplaceCatalog, McpServer, McpViewTab } from "../../../src/shared/mcp"
 import { McpServiceClient, ModelsServiceClient, StateServiceClient, UiServiceClient } from "../services/grpc-client"
 
@@ -35,7 +34,9 @@ export interface ExtensionStateContextType extends ExtensionState {
 	showWelcome: boolean
 	onboardingModels: OnboardingModelGroup | undefined
 	openRouterModels: Record<string, ModelInfo>
+	vercelAiGatewayModels: Record<string, ModelInfo>
 	hicapModels: Record<string, ModelInfo>
+	liteLlmModels: Record<string, ModelInfo>
 	openAiModels: string[]
 	requestyModels: Record<string, ModelInfo>
 	groqModels: Record<string, ModelInfo>
@@ -45,16 +46,19 @@ export interface ExtensionStateContextType extends ExtensionState {
 	mcpMarketplaceCatalog: McpMarketplaceCatalog
 	totalTasksSize: number | null
 	lastDismissedCliBannerVersion: number
+	dismissedBanners?: Array<{ bannerId: string; dismissedAt: number }>
 
 	availableTerminalProfiles: TerminalProfile[]
 
 	// View state
 	showMcp: boolean
-	hooksEnabled?: ClineFeatureSetting
 	mcpTab?: McpViewTab
 	showSettings: boolean
+	settingsTargetSection?: string
+	settingsInitialModelTab?: "recommended" | "free"
 	showHistory: boolean
 	showAccount: boolean
+	showWorktrees: boolean
 	showAnnouncement: boolean
 	showChatModelSelector: boolean
 	expandTaskHeader: boolean
@@ -76,6 +80,8 @@ export interface ExtensionStateContextType extends ExtensionState {
 	setLocalAgentsRulesToggles: (toggles: Record<string, boolean>) => void
 	setLocalWorkflowToggles: (toggles: Record<string, boolean>) => void
 	setGlobalWorkflowToggles: (toggles: Record<string, boolean>) => void
+	setGlobalSkillsToggles: (toggles: Record<string, boolean>) => void
+	setLocalSkillsToggles: (toggles: Record<string, boolean>) => void
 	setRemoteRulesToggles: (toggles: Record<string, boolean>) => void
 	setRemoteWorkflowToggles: (toggles: Record<string, boolean>) => void
 	setMcpMarketplaceCatalog: (value: McpMarketplaceCatalog) => void
@@ -86,7 +92,9 @@ export interface ExtensionStateContextType extends ExtensionState {
 
 	// Refresh functions
 	refreshOpenRouterModels: () => void
+	refreshVercelAiGatewayModels: () => void
 	refreshHicapModels: () => void
+	refreshLiteLlmModels: () => void
 	setUserInfo: (userInfo?: UserInfo) => void
 
 	// Navigation state setters
@@ -95,15 +103,18 @@ export interface ExtensionStateContextType extends ExtensionState {
 
 	// Navigation functions
 	navigateToMcp: (tab?: McpViewTab) => void
-	navigateToSettings: () => void
+	navigateToSettings: (targetSection?: string) => void
+	navigateToSettingsModelPicker: (opts: { targetSection?: string; initialModelTab?: "recommended" | "free" }) => void
 	navigateToHistory: () => void
 	navigateToAccount: () => void
+	navigateToWorktrees: () => void
 	navigateToChat: () => void
 
 	// Hide functions
 	hideSettings: () => void
 	hideHistory: () => void
 	hideAccount: () => void
+	hideWorktrees: () => void
 	hideAnnouncement: () => void
 	hideChatModelSelector: () => void
 	closeMcpView: () => void
@@ -121,8 +132,11 @@ export const ExtensionStateContextProvider: React.FC<{
 	const [showMcp, setShowMcp] = useState(false)
 	const [mcpTab, setMcpTab] = useState<McpViewTab | undefined>(undefined)
 	const [showSettings, setShowSettings] = useState(false)
+	const [settingsTargetSection, setSettingsTargetSection] = useState<string | undefined>(undefined)
+	const [settingsInitialModelTab, setSettingsInitialModelTab] = useState<"recommended" | "free" | undefined>(undefined)
 	const [showHistory, setShowHistory] = useState(false)
 	const [showAccount, setShowAccount] = useState(false)
+	const [showWorktrees, setShowWorktrees] = useState(false)
 	const [showAnnouncement, setShowAnnouncement] = useState(false)
 	const [showChatModelSelector, setShowChatModelSelector] = useState(false)
 
@@ -133,9 +147,14 @@ export const ExtensionStateContextProvider: React.FC<{
 	}, [setShowMcp, setMcpTab])
 
 	// Hide functions
-	const hideSettings = useCallback(() => setShowSettings(false), [setShowSettings])
+	const hideSettings = useCallback(() => {
+		setShowSettings(false)
+		setSettingsTargetSection(undefined)
+		setSettingsInitialModelTab(undefined)
+	}, [])
 	const hideHistory = useCallback(() => setShowHistory(false), [setShowHistory])
 	const hideAccount = useCallback(() => setShowAccount(false), [setShowAccount])
+	const hideWorktrees = useCallback(() => setShowWorktrees(false), [setShowWorktrees])
 	const hideAnnouncement = useCallback(() => setShowAnnouncement(false), [setShowAnnouncement])
 	const hideChatModelSelector = useCallback(() => setShowChatModelSelector(false), [setShowChatModelSelector])
 
@@ -145,41 +164,72 @@ export const ExtensionStateContextProvider: React.FC<{
 			setShowSettings(false)
 			setShowHistory(false)
 			setShowAccount(false)
+			setShowWorktrees(false)
 			if (tab) {
 				setMcpTab(tab)
 			}
 			setShowMcp(true)
 		},
-		[setShowMcp, setMcpTab, setShowSettings, setShowHistory, setShowAccount],
+		[setShowMcp, setMcpTab, setShowSettings, setShowHistory, setShowAccount, setShowWorktrees],
 	)
 
-	const navigateToSettings = useCallback(() => {
-		setShowHistory(false)
-		closeMcpView()
-		setShowAccount(false)
-		setShowSettings(true)
-	}, [setShowSettings, setShowHistory, closeMcpView, setShowAccount])
+	const navigateToSettings = useCallback(
+		(targetSection?: string) => {
+			setShowHistory(false)
+			closeMcpView()
+			setShowAccount(false)
+			setShowWorktrees(false)
+			setSettingsTargetSection(targetSection)
+			setSettingsInitialModelTab(undefined)
+			setShowSettings(true)
+		},
+		[closeMcpView],
+	)
+
+	const navigateToSettingsModelPicker = useCallback(
+		(opts: { targetSection?: string; initialModelTab?: "recommended" | "free" }) => {
+			setShowHistory(false)
+			closeMcpView()
+			setShowAccount(false)
+			setShowWorktrees(false)
+			setSettingsTargetSection(opts.targetSection)
+			setSettingsInitialModelTab(opts.initialModelTab)
+			setShowSettings(true)
+		},
+		[closeMcpView],
+	)
 
 	const navigateToHistory = useCallback(() => {
 		setShowSettings(false)
 		closeMcpView()
 		setShowAccount(false)
+		setShowWorktrees(false)
 		setShowHistory(true)
-	}, [setShowSettings, closeMcpView, setShowAccount, setShowHistory])
+	}, [setShowSettings, closeMcpView, setShowAccount, setShowWorktrees, setShowHistory])
 
 	const navigateToAccount = useCallback(() => {
 		setShowSettings(false)
 		closeMcpView()
 		setShowHistory(false)
+		setShowWorktrees(false)
 		setShowAccount(true)
-	}, [setShowSettings, closeMcpView, setShowHistory, setShowAccount])
+	}, [setShowSettings, closeMcpView, setShowHistory, setShowWorktrees, setShowAccount])
+
+	const navigateToWorktrees = useCallback(() => {
+		setShowSettings(false)
+		closeMcpView()
+		setShowHistory(false)
+		setShowAccount(false)
+		setShowWorktrees(true)
+	}, [setShowSettings, closeMcpView, setShowHistory, setShowAccount, setShowWorktrees])
 
 	const navigateToChat = useCallback(() => {
 		setShowSettings(false)
 		closeMcpView()
 		setShowHistory(false)
 		setShowAccount(false)
-	}, [setShowSettings, closeMcpView, setShowHistory, setShowAccount])
+		setShowWorktrees(false)
+	}, [setShowSettings, closeMcpView, setShowHistory, setShowAccount, setShowWorktrees])
 
 	const [state, setState] = useState<ExtensionState>({
 		version: "",
@@ -222,23 +272,30 @@ export const ExtensionStateContextProvider: React.FC<{
 		yoloModeToggled: false,
 		customPrompt: undefined,
 		useAutoCondense: false,
+		clineWebToolsEnabled: { user: true, featureFlag: false },
+		worktreesEnabled: { user: true, featureFlag: false },
 		autoCondenseThreshold: undefined,
 		favoritedModelIds: [],
 		lastDismissedInfoBannerVersion: 0,
 		lastDismissedModelBannerVersion: 0,
+		optOutOfRemoteConfig: false,
 		remoteConfigSettings: {},
 		backgroundCommandRunning: false,
 		backgroundCommandTaskId: undefined,
 		lastDismissedCliBannerVersion: 0,
 		subagentsEnabled: false,
+		backgroundEditEnabled: false,
+		globalSkillsToggles: {},
+		localSkillsToggles: {},
 
 		// NEW: Add workspace information with defaults
 		workspaceRoots: [],
 		primaryRootIndex: 0,
 		isMultiRootWorkspace: false,
 		multiRootSetting: { user: false, featureFlag: false },
-		hooksEnabled: { user: false, featureFlag: false },
-		nativeToolCallSetting: { user: false, featureFlag: false },
+		hooksEnabled: false,
+		nativeToolCallSetting: false,
+		enableParallelToolCalling: false,
 	})
 	const [expandTaskHeader, setExpandTaskHeader] = useState(true)
 	const [didHydrateState, setDidHydrateState] = useState(false)
@@ -249,7 +306,9 @@ export const ExtensionStateContextProvider: React.FC<{
 	const [openRouterModels, setOpenRouterModels] = useState<Record<string, ModelInfo>>({
 		[openRouterDefaultModelId]: openRouterDefaultModelInfo,
 	})
+	const [vercelAiGatewayModels, setVercelAiGatewayModels] = useState<Record<string, ModelInfo>>({})
 	const [hicapModels, setHicapModels] = useState<Record<string, ModelInfo>>({})
+	const [liteLlmModels, setLiteLlmModels] = useState<Record<string, ModelInfo>>({})
 	const [totalTasksSize, setTotalTasksSize] = useState<number | null>(null)
 	const [availableTerminalProfiles, setAvailableTerminalProfiles] = useState<TerminalProfile[]>([])
 
@@ -261,6 +320,7 @@ export const ExtensionStateContextProvider: React.FC<{
 		[groqDefaultModelId]: groqModels[groqDefaultModelId],
 	})
 	const [basetenModelsState, setBasetenModels] = useState<Record<string, ModelInfo>>({
+		...basetenModels,
 		[basetenDefaultModelId]: basetenModels[basetenDefaultModelId],
 	})
 	const [huggingFaceModels, setHuggingFaceModels] = useState<Record<string, ModelInfo>>({})
@@ -270,16 +330,16 @@ export const ExtensionStateContextProvider: React.FC<{
 	// References to store subscription cancellation functions
 	const stateSubscriptionRef = useRef<(() => void) | null>(null)
 
-	// Reference for focusChatInput subscription
-	const focusChatInputUnsubscribeRef = useRef<(() => void) | null>(null)
 	const mcpButtonUnsubscribeRef = useRef<(() => void) | null>(null)
 	const historyButtonClickedSubscriptionRef = useRef<(() => void) | null>(null)
 	const chatButtonUnsubscribeRef = useRef<(() => void) | null>(null)
 	const accountButtonClickedSubscriptionRef = useRef<(() => void) | null>(null)
 	const settingsButtonClickedSubscriptionRef = useRef<(() => void) | null>(null)
+	const worktreesButtonClickedSubscriptionRef = useRef<(() => void) | null>(null)
 	const partialMessageUnsubscribeRef = useRef<(() => void) | null>(null)
 	const mcpMarketplaceUnsubscribeRef = useRef<(() => void) | null>(null)
 	const openRouterModelsUnsubscribeRef = useRef<(() => void) | null>(null)
+	const liteLlmModelsUnsubscribeRef = useRef<(() => void) | null>(null)
 	const workspaceUpdatesUnsubscribeRef = useRef<(() => void) | null>(null)
 	const relinquishControlUnsubscribeRef = useRef<(() => void) | null>(null)
 
@@ -294,7 +354,6 @@ export const ExtensionStateContextProvider: React.FC<{
 		}
 	}, [])
 	const mcpServersSubscriptionRef = useRef<(() => void) | null>(null)
-	const didBecomeVisibleUnsubscribeRef = useRef<(() => void) | null>(null)
 
 	// Subscribe to state updates and UI events using the gRPC streaming API
 	useEffect(() => {
@@ -402,18 +461,6 @@ export const ExtensionStateContextProvider: React.FC<{
 			},
 		)
 
-		// Subscribe to didBecomeVisible events
-		didBecomeVisibleUnsubscribeRef.current = UiServiceClient.subscribeToDidBecomeVisible(EmptyRequest.create({}), {
-			onResponse: () => {
-				console.log("[DEBUG] Received didBecomeVisible event from gRPC stream")
-				window.dispatchEvent(new CustomEvent("focusChatInput"))
-			},
-			onError: (error) => {
-				console.error("Error in didBecomeVisible subscription:", error)
-			},
-			onComplete: () => {},
-		})
-
 		// Subscribe to MCP servers updates
 		mcpServersSubscriptionRef.current = McpServiceClient.subscribeToMcpServers(EmptyRequest.create(), {
 			onResponse: (response) => {
@@ -443,6 +490,23 @@ export const ExtensionStateContextProvider: React.FC<{
 				console.log("Settings button clicked subscription completed")
 			},
 		})
+
+		// Set up worktrees button clicked subscription
+		worktreesButtonClickedSubscriptionRef.current = UiServiceClient.subscribeToWorktreesButtonClicked(
+			EmptyRequest.create({}),
+			{
+				onResponse: () => {
+					// When worktrees button is clicked, navigate to worktrees
+					navigateToWorktrees()
+				},
+				onError: (error) => {
+					console.error("Error in worktrees button clicked subscription:", error)
+				},
+				onComplete: () => {
+					console.log("Worktrees button clicked subscription completed")
+				},
+			},
+		)
 
 		// Subscribe to partial message events
 		partialMessageUnsubscribeRef.current = UiServiceClient.subscribeToPartialMessage(EmptyRequest.create({}), {
@@ -508,6 +572,20 @@ export const ExtensionStateContextProvider: React.FC<{
 			},
 		})
 
+		// Subscribe to LiteLLM models updates
+		liteLlmModelsUnsubscribeRef.current = ModelsServiceClient.subscribeToLiteLlmModels(EmptyRequest.create({}), {
+			onResponse: (response: OpenRouterCompatibleModelInfo) => {
+				const models = fromProtobufModels(response.models)
+				setLiteLlmModels(models)
+			},
+			onError: (error) => {
+				console.error("Error in LiteLLM models subscription:", error)
+			},
+			onComplete: () => {
+				console.log("LiteLLM models subscription completed")
+			},
+		})
+
 		// Initialize webview using gRPC
 		UiServiceClient.initializeWebview(EmptyRequest.create({}))
 			.then(() => {
@@ -555,21 +633,6 @@ export const ExtensionStateContextProvider: React.FC<{
 			onComplete: () => {},
 		})
 
-		// Subscribe to focus chat input events
-		focusChatInputUnsubscribeRef.current = UiServiceClient.subscribeToFocusChatInput(
-			{},
-			{
-				onResponse: () => {
-					// Dispatch a local DOM event within this webview only
-					window.dispatchEvent(new CustomEvent("focusChatInput"))
-				},
-				onError: (error: Error) => {
-					console.error("Error in focusChatInput subscription:", error)
-				},
-				onComplete: () => {},
-			},
-		)
-
 		// Clean up subscriptions when component unmounts
 		return () => {
 			if (stateSubscriptionRef.current) {
@@ -596,6 +659,10 @@ export const ExtensionStateContextProvider: React.FC<{
 				settingsButtonClickedSubscriptionRef.current()
 				settingsButtonClickedSubscriptionRef.current = null
 			}
+			if (worktreesButtonClickedSubscriptionRef.current) {
+				worktreesButtonClickedSubscriptionRef.current()
+				worktreesButtonClickedSubscriptionRef.current = null
+			}
 			if (partialMessageUnsubscribeRef.current) {
 				partialMessageUnsubscribeRef.current()
 				partialMessageUnsubscribeRef.current = null
@@ -608,6 +675,10 @@ export const ExtensionStateContextProvider: React.FC<{
 				openRouterModelsUnsubscribeRef.current()
 				openRouterModelsUnsubscribeRef.current = null
 			}
+			if (liteLlmModelsUnsubscribeRef.current) {
+				liteLlmModelsUnsubscribeRef.current()
+				liteLlmModelsUnsubscribeRef.current = null
+			}
 			if (workspaceUpdatesUnsubscribeRef.current) {
 				workspaceUpdatesUnsubscribeRef.current()
 				workspaceUpdatesUnsubscribeRef.current = null
@@ -616,17 +687,9 @@ export const ExtensionStateContextProvider: React.FC<{
 				relinquishControlUnsubscribeRef.current()
 				relinquishControlUnsubscribeRef.current = null
 			}
-			if (focusChatInputUnsubscribeRef.current) {
-				focusChatInputUnsubscribeRef.current()
-				focusChatInputUnsubscribeRef.current = null
-			}
 			if (mcpServersSubscriptionRef.current) {
 				mcpServersSubscriptionRef.current()
 				mcpServersSubscriptionRef.current = null
-			}
-			if (didBecomeVisibleUnsubscribeRef.current) {
-				didBecomeVisibleUnsubscribeRef.current()
-				didBecomeVisibleUnsubscribeRef.current = null
 			}
 		}
 	}, [])
@@ -654,13 +717,67 @@ export const ExtensionStateContextProvider: React.FC<{
 			.catch((error: Error) => console.error("Failed to refresh Hicap models:", error))
 	}, [])
 
+	const refreshLiteLlmModels = useCallback(() => {
+		ModelsServiceClient.refreshLiteLlmModelsRpc(EmptyRequest.create({}))
+			.then((response: OpenRouterCompatibleModelInfo) => {
+				const models = fromProtobufModels(response.models)
+				setLiteLlmModels(models)
+			})
+			.catch((error: Error) => console.error("Failed to refresh LiteLLM models:", error))
+	}, [])
+
+	const refreshBasetenModels = useCallback(() => {
+		ModelsServiceClient.refreshBasetenModelsRpc(EmptyRequest.create({}))
+			.then((response) => {
+				setBasetenModels({
+					[basetenDefaultModelId]: basetenModels[basetenDefaultModelId],
+					...fromProtobufModels(response.models),
+				})
+			})
+			.catch((err) => console.error("Failed to refresh Baseten models:", err))
+	}, [])
+
+	const refreshVercelAiGatewayModels = useCallback(() => {
+		ModelsServiceClient.refreshVercelAiGatewayModelsRpc(EmptyRequest.create({}))
+			.then((response: OpenRouterCompatibleModelInfo) => {
+				const models = fromProtobufModels(response.models)
+				setVercelAiGatewayModels(models)
+			})
+			.catch((error: Error) => console.error("Failed to refresh Vercel AI Gateway models:", error))
+	}, [])
+
+	// Auto-refresh model lists on API key availability
+	useEffect(() => {
+		if (!openRouterModels || Object.keys(openRouterModels).length <= 1) {
+			refreshOpenRouterModels()
+		}
+		if (!vercelAiGatewayModels || Object.keys(vercelAiGatewayModels).length === 0) {
+			refreshVercelAiGatewayModels()
+		}
+		if (state.apiConfiguration?.basetenApiKey) {
+			refreshBasetenModels()
+		}
+		if (state.apiConfiguration?.liteLlmApiKey) {
+			refreshLiteLlmModels()
+		}
+	}, [
+		refreshOpenRouterModels,
+		refreshVercelAiGatewayModels,
+		state?.apiConfiguration?.basetenApiKey,
+		refreshBasetenModels,
+		state?.apiConfiguration?.liteLlmApiKey,
+		refreshLiteLlmModels,
+	])
+
 	const contextValue: ExtensionStateContextType = {
 		...state,
 		didHydrateState,
 		showWelcome,
 		onboardingModels,
 		openRouterModels,
+		vercelAiGatewayModels,
 		hicapModels,
+		liteLlmModels,
 		openAiModels,
 		requestyModels,
 		groqModels: groqModelsState,
@@ -673,8 +790,11 @@ export const ExtensionStateContextProvider: React.FC<{
 		showMcp,
 		mcpTab,
 		showSettings,
+		settingsTargetSection,
+		settingsInitialModelTab,
 		showHistory,
 		showAccount,
+		showWorktrees,
 		showAnnouncement,
 		showChatModelSelector,
 		globalClineRulesToggles: state.globalClineRulesToggles || {},
@@ -692,14 +812,17 @@ export const ExtensionStateContextProvider: React.FC<{
 		// Navigation functions
 		navigateToMcp,
 		navigateToSettings,
+		navigateToSettingsModelPicker,
 		navigateToHistory,
 		navigateToAccount,
+		navigateToWorktrees,
 		navigateToChat,
 
 		// Hide functions
 		hideSettings,
 		hideHistory,
 		hideAccount,
+		hideWorktrees,
 		hideAnnouncement,
 		setShowAnnouncement,
 		hideChatModelSelector,
@@ -754,6 +877,16 @@ export const ExtensionStateContextProvider: React.FC<{
 				...prevState,
 				globalWorkflowToggles: toggles,
 			})),
+		setGlobalSkillsToggles: (toggles) =>
+			setState((prevState) => ({
+				...prevState,
+				globalSkillsToggles: toggles,
+			})),
+		setLocalSkillsToggles: (toggles) =>
+			setState((prevState) => ({
+				...prevState,
+				localSkillsToggles: toggles,
+			})),
 		setRemoteRulesToggles: (toggles) =>
 			setState((prevState) => ({
 				...prevState,
@@ -767,7 +900,9 @@ export const ExtensionStateContextProvider: React.FC<{
 		setMcpTab,
 		setTotalTasksSize,
 		refreshOpenRouterModels,
+		refreshVercelAiGatewayModels,
 		refreshHicapModels,
+		refreshLiteLlmModels,
 		onRelinquishControl,
 		setUserInfo: (userInfo?: UserInfo) => setState((prevState) => ({ ...prevState, userInfo })),
 		expandTaskHeader,

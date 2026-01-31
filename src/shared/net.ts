@@ -93,7 +93,9 @@
  * ```
  */
 
+import OpenAI, { ClientOptions as OpenAIClientOptions } from "openai"
 import { EnvHttpProxyAgent, setGlobalDispatcher, fetch as undiciFetch } from "undici"
+import { buildExternalBasicHeaders } from "@/services/EnvUtils"
 
 let mockFetch: typeof globalThis.fetch | undefined
 
@@ -112,8 +114,9 @@ export const fetch: typeof globalThis.fetch = (() => {
 
 	let baseFetch: typeof globalThis.fetch = globalThis.fetch
 	// Note: See esbuild.mjs, process.env.IS_STANDALONE is statically rewritten
-	// 'true' in the JetBrains/CLI build.
-	if (process.env.IS_STANDALONE) {
+	// to "true" or "false" (as strings) in the JetBrains/CLI build.
+	// We must use explicit string comparison because "false" is truthy in JS.
+	if (process.env.IS_STANDALONE === "true") {
 		// Configure undici with ProxyAgent
 		const agent = new EnvHttpProxyAgent({})
 		setGlobalDispatcher(agent)
@@ -173,4 +176,21 @@ export function getAxiosSettings(): { adapter?: any; fetch?: typeof globalThis.f
 		adapter: "fetch" as any,
 		fetch, // Use our configured fetch
 	}
+}
+
+/**
+ * Creates an OpenAI client with proper proxy support and external headers.
+ * Use this instead of creating OpenAI clients directly to ensure consistent
+ * configuration across all providers.
+ */
+export function createOpenAIClient(options: OpenAIClientOptions): OpenAI {
+	const externalHeaders = buildExternalBasicHeaders()
+	return new OpenAI({
+		...options,
+		defaultHeaders: {
+			...externalHeaders,
+			...options.defaultHeaders,
+		},
+		fetch, // Use configured fetch with proxy support
+	})
 }

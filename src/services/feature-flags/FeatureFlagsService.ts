@@ -1,10 +1,18 @@
 import { clearOnboardingModelsCache, getClineOnboardingModels } from "@/core/controller/models/getClineOnboardingModels"
 import type { OnboardingModel } from "@/shared/proto/cline/state"
 import { FEATURE_FLAGS, FeatureFlag, FeatureFlagDefaultValue } from "@/shared/services/feature-flags/feature-flags"
-import type { FeatureFlagPayload, IFeatureFlagsProvider } from "./providers/IFeatureFlagsProvider"
+import { Logger } from "@/shared/services/Logger"
+import { telemetryService } from "../telemetry"
+import type { FeatureFlagPayload, FeatureFlagsAndPayloads, IFeatureFlagsProvider } from "./providers/IFeatureFlagsProvider"
 
 // Default cache time-to-live (TTL) for feature flags - an hour
 const DEFAULT_CACHE_TTL = 60 * 60 * 1000
+
+type CacheInfo = {
+	updateTime: number
+	userId: string | null
+	flagsPayload?: FeatureFlagsAndPayloads
+}
 
 /**
  * FeatureFlagsService provides feature flag functionality that works independently
@@ -23,26 +31,38 @@ export class FeatureFlagsService {
 	/**
 	 * Tracks cache update time and user ID for cache validity
 	 */
-	private cacheInfo = { updateTime: 0, userId: null as string | null }
+	private cacheInfo: CacheInfo = { updateTime: 0, userId: null }
 
 	/**
 	 * Poll all known feature flags to update their cached values
 	 */
-	public async poll(userId?: string): Promise<void> {
+	public async poll(userId: string | null): Promise<void> {
 		// Do not update cache if last update was less than an hour ago
 		const timesNow = Date.now()
 		if (timesNow - this.cacheInfo.updateTime < DEFAULT_CACHE_TTL && this.cache.size) {
-			// If time is within TTL, only skip if user context (userId) is unchanged.
-			// If userId changed (including from/to undefined/null), refresh cache.
-			if (userId && this.cacheInfo.userId === userId) {
+			// Skip fetch if within TTL and user context is unchanged
+			if (this.cacheInfo.userId === userId) {
 				return
 			}
 		}
+
+		// Only update timestamp after successfully populating cache
 		this.cacheInfo = { updateTime: timesNow, userId: userId || null }
 
-		for (const flag of FEATURE_FLAGS) {
-			const payload = await this.getFeatureFlag(flag).catch(() => false)
-			this.cache.set(flag, payload ?? false)
+		try {
+			const values = await this.provider.getAllFlagsAndPayloads({
+				flagKeys: FEATURE_FLAGS,
+			})
+			this.cacheInfo.flagsPayload = values
+
+			for (const flag of FEATURE_FLAGS) {
+				const payload = await this.getFeatureFlag(flag).catch(() => false)
+				this.cache.set(flag, payload ?? false)
+			}
+		} catch (error) {
+			// On error, clear cache info to force refresh on next poll
+			this.cacheInfo = { updateTime: 0, userId: null }
+			throw error
 		}
 
 		getClineOnboardingModels() // Refresh onboarding models cache if relevant flag changed
@@ -50,28 +70,25 @@ export class FeatureFlagsService {
 
 	private async getFeatureFlag(flagName: FeatureFlag): Promise<FeatureFlagPayload | undefined> {
 		try {
-			const payload = await this.provider.getFeatureFlagPayload(flagName)
-			const flagValue = await this.provider.getFeatureFlag(flagName)
+			const payload = this.cacheInfo.flagsPayload?.featureFlagPayloads?.[flagName]
+			const flagValue = this.cacheInfo.flagsPayload?.featureFlags?.[flagName]
 			const value = payload ?? flagValue ?? FeatureFlagDefaultValue[flagName] ?? undefined
+
+			if (!this.cache.has(flagName) || this.cache.get(flagName) !== value) {
+				telemetryService.capture({
+					event: "$feature_flag_called",
+					properties: {
+						$feature_flag: flagName,
+						$feature_flag_response: flagValue,
+					},
+				})
+			}
+
 			return value
 		} catch (error) {
-			console.error(`Error checking if feature flag ${flagName} is enabled:`, error)
+			Logger.error(`Error checking if feature flag ${flagName} is enabled:`, error)
 			return FeatureFlagDefaultValue[flagName] ?? false
 		}
-	}
-
-	/**
-	 * Check if a feature flag is enabled
-	 * This method works regardless of telemetry settings to ensure feature flags
-	 * can control extension behavior independently of user privacy preferences.
-	 *
-	 * @param flagName The feature flag key
-	 * @returns Boolean indicating if the feature is enabled
-	 */
-	public async isFeatureFlagEnabled(flagName: FeatureFlag): Promise<boolean> {
-		const value = this.cache.has(flagName) ? this.cache.get(flagName) : await this.getFeatureFlag(flagName)
-
-		return !!value
 	}
 
 	/**
@@ -85,20 +102,12 @@ export class FeatureFlagsService {
 		return this.cache.get(flagName) === true
 	}
 
-	public getDoNothingFlag(): boolean {
-		return this.getBooleanFlagEnabled(FeatureFlag.DO_NOTHING)
+	public getWebtoolsEnabled(): boolean {
+		return this.getBooleanFlagEnabled(FeatureFlag.WEBTOOLS)
 	}
 
-	public getHooksEnabled(): boolean {
-		return false
-	}
-
-	public getNativeToolCallEnabled(): boolean {
-		return this.getBooleanFlagEnabled(FeatureFlag.NATIVE_TOOL_CALLS_NEXT_GEN_MODELS)
-	}
-
-	public isResponseApiEnabled(): boolean {
-		return this.getBooleanFlagEnabled(FeatureFlag.OPENAI_NATIVE_RESPONSE_API)
+	public getWorktreesEnabled(): boolean {
+		return this.getBooleanFlagEnabled(FeatureFlag.WORKTREES)
 	}
 
 	public getOnboardingOverrides() {
@@ -109,20 +118,6 @@ export class FeatureFlagsService {
 		}
 		clearOnboardingModelsCache()
 		return undefined
-	}
-
-	/**
-	 * Get the feature flag payload for advanced use cases
-	 * @param flagName The feature flag key
-	 * @returns The feature flag payload or null if not found
-	 */
-	public async getPayload(flagName: string): Promise<FeatureFlagPayload | null> {
-		try {
-			return (await this.provider.getFeatureFlagPayload(flagName)) ?? null
-		} catch (error) {
-			console.error(`Error retrieving feature flag payload for ${flagName}:`, error)
-			return null
-		}
 	}
 
 	/**
@@ -147,19 +142,6 @@ export class FeatureFlagsService {
 	 */
 	public getSettings() {
 		return this.provider.getSettings()
-	}
-
-	/**
-	 * Reset the feature flags cache
-	 * Should run on user auth state changes to ensure flags are up-to-date
-	 */
-	public reset(userId?: string): void {
-		// Skip known user ID to avoid redundant resets
-		if (userId && this.cacheInfo.userId === userId) {
-			return
-		}
-		this.cacheInfo = { updateTime: 0, userId: userId || null }
-		this.cache.clear()
 	}
 
 	/**

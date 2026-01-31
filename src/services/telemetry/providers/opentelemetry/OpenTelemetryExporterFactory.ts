@@ -7,6 +7,7 @@ import { OTLPMetricExporter as OTLPMetricExporterHTTP } from "@opentelemetry/exp
 import { OTLPMetricExporter as OTLPMetricExporterProto } from "@opentelemetry/exporter-metrics-otlp-proto"
 import { ConsoleLogRecordExporter, LogRecordExporter } from "@opentelemetry/sdk-logs"
 import { ConsoleMetricExporter, MetricReader, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics"
+import { Logger } from "@/shared/services/Logger"
 import { wrapLogsExporterWithDiagnostics, wrapMetricsExporterWithDiagnostics } from "./otel-exporter-diagnostics"
 
 /**
@@ -26,9 +27,18 @@ export function createConsoleLogExporter(): ConsoleLogRecordExporter {
 /**
  * Create an OTLP log exporter based on protocol
  */
-export function createOTLPLogExporter(protocol: string, endpoint: string, insecure: boolean): LogRecordExporter | null {
+export function createOTLPLogExporter(
+	protocol: string,
+	endpoint: string,
+	insecure: boolean,
+	headers?: Record<string, string>,
+): LogRecordExporter | null {
 	try {
 		let exporter: any = null
+		const logsUrl = new URL(endpoint)
+		if (logsUrl.pathname === "/" || logsUrl.pathname === "") {
+			logsUrl.pathname = "/v1/logs"
+		}
 
 		switch (protocol) {
 			case "grpc": {
@@ -38,21 +48,20 @@ export function createOTLPLogExporter(protocol: string, endpoint: string, insecu
 				exporter = new OTLPLogExporterGRPC({
 					url: grpcEndpoint,
 					credentials: credentials,
+					headers,
 				})
 				break
 			}
 			case "http/json": {
-				const logsUrl = endpoint.endsWith("/v1/logs") ? endpoint : `${endpoint}/v1/logs`
-				exporter = new OTLPLogExporterHTTP({ url: logsUrl })
+				exporter = new OTLPLogExporterHTTP({ url: logsUrl.toString(), headers })
 				break
 			}
 			case "http/protobuf": {
-				const logsUrl = endpoint.endsWith("/v1/logs") ? endpoint : `${endpoint}/v1/logs`
-				exporter = new OTLPLogExporterProto({ url: logsUrl })
+				exporter = new OTLPLogExporterProto({ url: logsUrl.toString(), headers })
 				break
 			}
 			default:
-				console.warn(`[OTEL] Unknown OTLP protocol for logs: ${protocol}`)
+				Logger.warn(`[OTEL] Unknown OTLP protocol for logs: ${protocol}`)
 				return null
 		}
 
@@ -63,7 +72,7 @@ export function createOTLPLogExporter(protocol: string, endpoint: string, insecu
 
 		return exporter
 	} catch (error) {
-		console.error("[OTEL] Error creating OTLP log exporter:", error)
+		Logger.error("[OTEL] Error creating OTLP log exporter:", error)
 		return null
 	}
 }
@@ -89,9 +98,15 @@ export function createOTLPMetricReader(
 	insecure: boolean,
 	intervalMs: number,
 	timeoutMs: number,
+	headers?: Record<string, string>,
 ): MetricReader | null {
 	try {
 		let exporter: any = null
+
+		const metricsUrl = new URL(endpoint)
+		if (metricsUrl.pathname === "/" || metricsUrl.pathname === "") {
+			metricsUrl.pathname = "/v1/metrics"
+		}
 
 		switch (protocol) {
 			case "grpc": {
@@ -101,21 +116,20 @@ export function createOTLPMetricReader(
 				exporter = new OTLPMetricExporterGRPC({
 					url: grpcEndpoint,
 					credentials: credentials,
+					headers,
 				})
 				break
 			}
 			case "http/json": {
-				const metricsUrl = endpoint.endsWith("/v1/metrics") ? endpoint : `${endpoint}/v1/metrics`
-				exporter = new OTLPMetricExporterHTTP({ url: metricsUrl })
+				exporter = new OTLPMetricExporterHTTP({ url: metricsUrl.toString(), headers })
 				break
 			}
 			case "http/protobuf": {
-				const metricsUrl = endpoint.endsWith("/v1/metrics") ? endpoint : `${endpoint}/v1/metrics`
-				exporter = new OTLPMetricExporterProto({ url: metricsUrl })
+				exporter = new OTLPMetricExporterProto({ url: metricsUrl.toString(), headers })
 				break
 			}
 			default:
-				console.warn(`[OTEL] Unknown OTLP protocol for metrics: ${protocol}`)
+				Logger.warn(`[OTEL] Unknown OTLP protocol for metrics: ${protocol}`)
 				return null
 		}
 
@@ -130,7 +144,7 @@ export function createOTLPMetricReader(
 			exportTimeoutMillis: timeoutMs,
 		})
 	} catch (error) {
-		console.error("[OTEL] Error creating OTLP metric reader:", error)
+		Logger.error("[OTEL] Error creating OTLP metric reader:", error)
 		return null
 	}
 }

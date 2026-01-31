@@ -125,7 +125,7 @@ const copyWasmFiles = {
 
 const buildEnvVars = {
 	"import.meta.url": "_importMetaUrl",
-	"process.env.IS_STANDALONE": JSON.stringify(standalone),
+	"process.env.IS_STANDALONE": JSON.stringify(standalone ? "true" : "false"),
 }
 
 if (production) {
@@ -142,10 +142,6 @@ if (process.env.TELEMETRY_SERVICE_API_KEY) {
 }
 if (process.env.ERROR_SERVICE_API_KEY) {
 	buildEnvVars["process.env.ERROR_SERVICE_API_KEY"] = JSON.stringify(process.env.ERROR_SERVICE_API_KEY)
-}
-
-if (process.env.POSTHOG_TELEMETRY_ENABLED) {
-	buildEnvVars["process.env.POSTHOG_TELEMETRY_ENABLED"] = JSON.stringify(process.env.POSTHOG_TELEMETRY_ENABLED)
 }
 
 // OpenTelemetry configuration (injected at build time from GitHub secrets)

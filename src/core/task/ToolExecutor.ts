@@ -1,15 +1,18 @@
 import { ApiHandler } from "@core/api"
 import { FileContextTracker } from "@core/context/context-tracking/FileContextTracker"
+import { getHooksEnabledSafe } from "@core/hooks/hooks-utils"
 import { ClineIgnoreController } from "@core/ignore/ClineIgnoreController"
+import { CommandPermissionController } from "@core/permissions"
 import { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
 import { BrowserSession } from "@services/browser/BrowserSession"
 import { UrlContentFetcher } from "@services/browser/UrlContentFetcher"
 import { McpHub } from "@services/mcp/McpHub"
 import { ClineAsk, ClineSay } from "@shared/ExtensionMessage"
+import { ClineContent } from "@shared/messages/content"
 import { ClineDefaultTool } from "@shared/tools"
 import { ClineAskResponse } from "@shared/WebviewMessage"
 import * as vscode from "vscode"
-import { modelDoesntSupportWebp } from "@/utils/model-utils"
+import { isGPT5ModelFamily, modelDoesntSupportWebp } from "@/utils/model-utils"
 import { ToolUse } from "../assistant-message"
 import { ContextManager } from "../context/context-management/ContextManager"
 import { formatResponse } from "../prompts/responses"
@@ -27,6 +30,7 @@ import { AttemptCompletionHandler } from "./tools/handlers/AttemptCompletionHand
 import { BrowserToolHandler } from "./tools/handlers/BrowserToolHandler"
 import { CondenseHandler } from "./tools/handlers/CondenseHandler"
 import { ExecuteCommandToolHandler } from "./tools/handlers/ExecuteCommandToolHandler"
+import { GenerateExplanationToolHandler } from "./tools/handlers/GenerateExplanationToolHandler"
 import { ListCodeDefinitionNamesToolHandler } from "./tools/handlers/ListCodeDefinitionNamesToolHandler"
 import { ListFilesToolHandler } from "./tools/handlers/ListFilesToolHandler"
 import { LoadMcpDocumentationHandler } from "./tools/handlers/LoadMcpDocumentationHandler"
@@ -37,7 +41,9 @@ import { ReportBugHandler } from "./tools/handlers/ReportBugHandler"
 import { SearchFilesToolHandler } from "./tools/handlers/SearchFilesToolHandler"
 import { SummarizeTaskHandler } from "./tools/handlers/SummarizeTaskHandler"
 import { UseMcpToolHandler } from "./tools/handlers/UseMcpToolHandler"
+import { UseSkillToolHandler } from "./tools/handlers/UseSkillToolHandler"
 import { WebFetchToolHandler } from "./tools/handlers/WebFetchToolHandler"
+import { WebSearchToolHandler } from "./tools/handlers/WebSearchToolHandler"
 import { WriteToFileToolHandler } from "./tools/handlers/WriteToFileToolHandler"
 import { IPartialBlockHandler, SharedToolHandler, ToolExecutorCoordinator } from "./tools/ToolExecutorCoordinator"
 import { ToolValidator } from "./tools/ToolValidator"
@@ -74,6 +80,7 @@ export class ToolExecutor {
 		private mcpHub: McpHub,
 		private fileContextTracker: FileContextTracker,
 		private clineIgnoreController: ClineIgnoreController,
+		private commandPermissionController: CommandPermissionController,
 		private contextManager: ContextManager,
 		private stateManager: StateManager,
 
@@ -119,6 +126,10 @@ export class ToolExecutor {
 		private setActiveHookExecution: (hookExecution: NonNullable<typeof taskState.activeHookExecution>) => Promise<void>,
 		private clearActiveHookExecution: () => Promise<void>,
 		private getActiveHookExecution: () => Promise<typeof taskState.activeHookExecution>,
+		private runUserPromptSubmitHook: (
+			userContent: ClineContent[],
+			context: "initial_task" | "resume" | "feedback",
+		) => Promise<{ cancel?: boolean; wasCancelled?: boolean; contextModification?: string; errorMessage?: string }>,
 	) {
 		this.autoApprover = new AutoApprove(this.stateManager)
 
@@ -138,6 +149,7 @@ export class ToolExecutor {
 			strictPlanModeEnabled: this.stateManager.getGlobalSettingsKey("strictPlanModeEnabled"),
 			yoloModeToggled: this.stateManager.getGlobalSettingsKey("yoloModeToggled"),
 			vscodeTerminalExecutionMode: this.vscodeTerminalExecutionMode,
+			enableParallelToolCalling: this.isParallelToolCallingEnabled(),
 			cwd: this.cwd,
 			workspaceManager: this.workspaceManager,
 			isMultiRootEnabled: this.isMultiRootEnabled,
@@ -155,6 +167,7 @@ export class ToolExecutor {
 				diffViewProvider: this.diffViewProvider,
 				fileContextTracker: this.fileContextTracker,
 				clineIgnoreController: this.clineIgnoreController,
+				commandPermissionController: this.commandPermissionController,
 				contextManager: this.contextManager,
 				stateManager: this.stateManager,
 			},
@@ -178,6 +191,7 @@ export class ToolExecutor {
 				setActiveHookExecution: this.setActiveHookExecution,
 				clearActiveHookExecution: this.clearActiveHookExecution,
 				getActiveHookExecution: this.getActiveHookExecution,
+				runUserPromptSubmitHook: this.runUserPromptSubmitHook,
 			},
 			coordinator: this.coordinator,
 		}
@@ -199,6 +213,7 @@ export class ToolExecutor {
 		this.coordinator.register(new BrowserToolHandler())
 		this.coordinator.register(new AskFollowupQuestionToolHandler())
 		this.coordinator.register(new WebFetchToolHandler())
+		this.coordinator.register(new WebSearchToolHandler())
 
 		// Register WriteToFileToolHandler for all three file tools with proper typing
 		const writeHandler = new WriteToFileToolHandler(validator)
@@ -212,6 +227,7 @@ export class ToolExecutor {
 		this.coordinator.register(new UseMcpToolHandler())
 		this.coordinator.register(new AccessMcpResourceHandler())
 		this.coordinator.register(new LoadMcpDocumentationHandler())
+		this.coordinator.register(new UseSkillToolHandler())
 		this.coordinator.register(new PlanModeRespondHandler())
 		this.coordinator.register(new ActModeRespondHandler())
 		this.coordinator.register(new NewTaskHandler())
@@ -220,6 +236,7 @@ export class ToolExecutor {
 		this.coordinator.register(new SummarizeTaskHandler(validator))
 		this.coordinator.register(new ReportBugHandler())
 		this.coordinator.register(new ApplyPatchHandler(validator))
+		this.coordinator.register(new GenerateExplanationToolHandler())
 	}
 
 	/**
@@ -251,7 +268,6 @@ export class ToolExecutor {
 	 * @param block The tool use block that caused the error
 	 */
 	private async handleError(action: string, error: Error, block: ToolUse): Promise<void> {
-		console.log(error)
 		const errorString = `Error ${action}: ${error.message}`
 		await this.say("error", errorString)
 
@@ -278,13 +294,24 @@ export class ToolExecutor {
 			block,
 			this.taskState.userMessageContent,
 			(block: ToolUse) => ToolDisplayUtils.getToolDescription(block),
-			this.api,
-			() => {
-				this.taskState.didAlreadyUseTool = true
-			},
 			this.coordinator,
 			this.taskState.toolUseIdMap,
 		)
+		// Mark that a tool has been used (only matters when parallel tool calling is disabled)
+		if (!this.isParallelToolCallingEnabled()) {
+			this.taskState.didAlreadyUseTool = true
+		}
+	}
+
+	/**
+	 * Check if parallel tool calling is enabled.
+	 * Parallel tool calling is enabled if:
+	 * 1. User has enabled it in settings, OR
+	 * 2. The current model is GPT-5 (which handles parallel tools well)
+	 */
+	private isParallelToolCallingEnabled(): boolean {
+		const modelId = this.api.getModel().id
+		return this.stateManager.getGlobalSettingsKey("enableParallelToolCalling") || isGPT5ModelFamily(modelId)
 	}
 
 	/**
@@ -294,6 +321,7 @@ export class ToolExecutor {
 		ClineDefaultTool.FILE_NEW,
 		ClineDefaultTool.FILE_EDIT,
 		ClineDefaultTool.NEW_RULE,
+		ClineDefaultTool.APPLY_PATCH,
 	]
 
 	/**
@@ -330,8 +358,8 @@ export class ToolExecutor {
 				return true
 			}
 
-			// Check if a tool has already been used in this message
-			if (this.taskState.didAlreadyUseTool) {
+			// Check if a tool has already been used in this message (only enforced when parallel tool calling is disabled)
+			if (!this.isParallelToolCallingEnabled() && this.taskState.didAlreadyUseTool) {
 				this.taskState.userMessageContent.push({
 					type: "text",
 					text: formatResponse.toolAlreadyUsed(block.name),
@@ -347,9 +375,12 @@ export class ToolExecutor {
 				this.isPlanModeToolRestricted(block.name)
 			) {
 				const errorMessage = `Tool '${block.name}' is not available in PLAN MODE. This tool is restricted to ACT MODE for file modifications. Only use tools available for PLAN MODE when in that mode.`
+				await this.removeLastPartialMessageIfExistsWithType("say", "error")
 				await this.say("error", errorMessage)
-				this.pushToolResult(formatResponse.toolError(errorMessage), block)
-				await this.saveCheckpoint()
+				// Only push the final error message when the streaming is done.
+				if (!block.partial) {
+					this.pushToolResult(formatResponse.toolError(errorMessage), block)
+				}
 				return true
 			}
 
@@ -366,11 +397,9 @@ export class ToolExecutor {
 
 			// Handle complete blocks
 			await this.handleCompleteBlock(block, config)
-			await this.saveCheckpoint()
 			return true
 		} catch (error) {
 			await this.handleError(`executing ${block.name}`, error as Error, block)
-			await this.saveCheckpoint()
 			return true
 		}
 	}
@@ -552,8 +581,7 @@ export class ToolExecutor {
 			return
 		}
 
-		// Check if hooks are enabled via user setting
-		const hooksEnabled = this.stateManager.getGlobalSettingsKey("hooksEnabled")
+		const hooksEnabled = getHooksEnabledSafe()
 
 		// Track if we need to cancel after hooks complete
 		let shouldCancelAfterHook = false
@@ -573,6 +601,9 @@ export class ToolExecutor {
 			toolResult = await this.coordinator.execute(config, block)
 			toolWasExecuted = true
 			this.pushToolResult(toolResult, block)
+
+			// Track the last executed tool for consecutive call detection (used by act_mode_respond)
+			this.taskState.lastToolName = block.name
 
 			// Check abort before running PostToolUse hook (success path)
 			if (this.taskState.abort) {

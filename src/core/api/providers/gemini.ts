@@ -9,15 +9,14 @@ import {
 	ThinkingLevel,
 } from "@google/genai"
 import { GeminiModelId, geminiDefaultModelId, geminiModels, ModelInfo } from "@shared/api"
+import { buildExternalBasicHeaders } from "@/services/EnvUtils"
 import { telemetryService } from "@/services/telemetry"
 import { ClineStorageMessage } from "@/shared/messages/content"
+import { Logger } from "@/shared/services/Logger"
 import { ApiHandler, CommonApiHandlerOptions } from "../"
 import { RetriableError, withRetry } from "../retry"
 import { convertAnthropicMessageToGemini } from "../transform/gemini-format"
 import { ApiStream } from "../transform/stream"
-
-// Define a default TTL for the cache (e.g., 15 minutes in seconds)
-const _DEFAULT_CACHE_TTL_SECONDS = 900
 
 const rateLimitPatterns = [/got status: 429/i, /429 Too Many Requests/i, /rate limit exceeded/i, /too many requests/i]
 
@@ -28,6 +27,7 @@ interface GeminiHandlerOptions extends CommonApiHandlerOptions {
 	geminiApiKey?: string
 	geminiBaseUrl?: string
 	thinkingBudgetTokens?: number
+	thinkingLevel?: string
 	apiModelId?: string
 	ulid?: string
 }
@@ -64,6 +64,7 @@ export class GeminiHandler implements ApiHandler {
 	private ensureClient(): GoogleGenAI {
 		if (!this.client) {
 			const options = this.options as GeminiHandlerOptions
+			const externalHeaders = buildExternalBasicHeaders()
 
 			if (options.isVertex) {
 				// Initialize with Vertex AI configuration
@@ -75,6 +76,9 @@ export class GeminiHandler implements ApiHandler {
 						vertexai: true,
 						project,
 						location,
+						httpOptions: {
+							headers: externalHeaders,
+						},
 					})
 				} catch (error) {
 					throw new Error(`Error creating Gemini Vertex AI client: ${error.message}`)
@@ -86,7 +90,12 @@ export class GeminiHandler implements ApiHandler {
 				}
 
 				try {
-					this.client = new GoogleGenAI({ apiKey: options.geminiApiKey })
+					this.client = new GoogleGenAI({
+						apiKey: options.geminiApiKey,
+						httpOptions: {
+							headers: externalHeaders,
+						},
+					})
 				} catch (error) {
 					throw new Error(`Error creating Gemini client: ${error.message}`)
 				}
@@ -119,10 +128,18 @@ export class GeminiHandler implements ApiHandler {
 		const _thinkingBudget = this.options.thinkingBudgetTokens ?? 0
 		const maxBudget = info.thinkingConfig?.maxBudget ?? 24576
 		const thinkingBudget = Math.min(_thinkingBudget, maxBudget)
-		const thinkLevel = info.thinkingConfig?.thinkingLevel
-		// When ThinkingLevel is defineded, thinking budget cannot be zero
+		// When ThinkingLevel is defined, thinking budget cannot be zero
 		// and only level is used to control thinking behavior.
-		const thinkingLevel = thinkLevel ? (thinkLevel === "low" ? ThinkingLevel.LOW : ThinkingLevel.HIGH) : undefined
+		// Only set thinkingLevel for models that support it
+		let thinkingLevel: ThinkingLevel | undefined
+		if (info.thinkingConfig?.supportsThinkingLevel) {
+			const level = this.options.thinkingLevel || info.thinkingConfig.geminiThinkingLevel
+			if (level === "high") {
+				thinkingLevel = ThinkingLevel.HIGH
+			} else if (level === "low") {
+				thinkingLevel = ThinkingLevel.LOW
+			}
+		}
 
 		// Set up base generation config
 		const requestConfig: GenerateContentConfig = {
@@ -134,16 +151,18 @@ export class GeminiHandler implements ApiHandler {
 			temperature: info.temperature ?? 1,
 		}
 
-		// Add thinking config if the model supports it
-		requestConfig.thinkingConfig = {
-			// Turn off thinking:
-			// thinkingBudget: 0
-			// Turn on dynamic thinking:
-			// thinkingBudget: -1
-			// Turn on fixed thinking budget:
-			thinkingBudget: thinkingLevel ? undefined : thinkingBudget,
-			thinkingLevel,
-			includeThoughts: thinkingBudget > 0,
+		// Add thinking config only if the model supports it
+		if (info.thinkingConfig) {
+			requestConfig.thinkingConfig = {
+				// Turn off thinking:
+				// thinkingBudget: 0
+				// Turn on dynamic thinking:
+				// thinkingBudget: -1
+				// Turn on fixed thinking budget:
+				thinkingBudget: thinkingLevel ? undefined : thinkingBudget, // Use budget only if thinkingLevel is not set
+				thinkingLevel,
+				includeThoughts: thinkingBudget > 0 || !!thinkingLevel,
+			}
 		}
 
 		// Generate content using the configured parameters
@@ -324,7 +343,7 @@ export class GeminiHandler implements ApiHandler {
 					throughputTokensPerSec: throughputTokensPerSecSdk,
 				})
 			} else {
-				console.warn("GeminiHandler: ulid not available for telemetry in createMessage.")
+				Logger.warn("GeminiHandler: ulid not available for telemetry in createMessage.")
 			}
 		}
 	}
@@ -400,7 +419,7 @@ export class GeminiHandler implements ApiHandler {
 			trace.cacheRead = { price: cacheReadsPrice, tokens: cacheReadTokens ?? 0, cost: cacheReadCost }
 		}
 
-		// console.log(`[GeminiHandler] calculateCost -> ${totalCost}`, trace)
+		// Logger.log(`[GeminiHandler] calculateCost -> ${totalCost}`, trace)
 		return totalCost
 	}
 
@@ -442,13 +461,13 @@ export class GeminiHandler implements ApiHandler {
 			})
 
 			if (response.totalTokens === undefined) {
-				console.warn("Gemini token counting returned undefined, using fallback")
+				Logger.warn("Gemini token counting returned undefined, using fallback")
 				return this.estimateTokens(content)
 			}
 
 			return response.totalTokens
 		} catch (error) {
-			console.warn("Gemini token counting failed, using fallback", error)
+			Logger.warn("Gemini token counting failed, using fallback", error)
 			return this.estimateTokens(content)
 		}
 	}
@@ -467,7 +486,7 @@ export class GeminiHandler implements ApiHandler {
 					const jsonStr = JSON.stringify(block)
 					return total + jsonStr.length
 				} catch (e) {
-					console.warn("Failed to stringify block for token estimation", e)
+					Logger.warn("Failed to stringify block for token estimation", e)
 					return total
 				}
 			}

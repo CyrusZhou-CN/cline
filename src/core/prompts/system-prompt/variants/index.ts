@@ -6,6 +6,7 @@
  * and use cases.
  */
 
+export { config as devstralConfig, type DevstralVariantConfig } from "./devstral/config"
 export { config as Gemini3Config, type Gemini3VariantConfig } from "./gemini-3/config"
 export { config as genericConfig, type GenericVariantConfig } from "./generic/config"
 export { config as glmConfig, type GLMVariantConfig } from "./glm/config"
@@ -15,9 +16,11 @@ export { config as NativeGPT5Config } from "./native-gpt-5/config"
 export { config as NativeGPT51Config } from "./native-gpt-5-1/config"
 export { config as nativeNextGenConfig, type NativeNextGenVariantConfig } from "./native-next-gen/config"
 export { config as nextGenConfig, type NextGenVariantConfig } from "./next-gen/config"
+export { config as trinityConfig, type TrinityVariantConfig } from "./trinity/config"
 export { config as xsConfig, type XsVariantConfig } from "./xs/config"
 
 import { ModelFamily } from "@/shared/prompts"
+import { config as devstralConfig } from "./devstral/config"
 import { config as Gemini3Config } from "./gemini-3/config"
 import { config as genericConfig } from "./generic/config"
 import { config as glmConfig } from "./glm/config"
@@ -27,6 +30,7 @@ import { config as NativeGPT5Config } from "./native-gpt-5/config"
 import { config as NativeGPT51Config } from "./native-gpt-5-1/config"
 import { config as NativeNextGenVariantConfig } from "./native-next-gen/config"
 import { config as nextGenConfig } from "./next-gen/config"
+import { config as trinityConfig } from "./trinity/config"
 import { config as xsConfig } from "./xs/config"
 
 /**
@@ -65,11 +69,20 @@ export const VARIANT_CONFIGS = {
 	 * Configured for advanced agentic coding capabilities
 	 */
 	[ModelFamily.HERMES]: hermesConfig,
+	/*** Devstral variant - Optimized for DEVSTRAL stealth model family
+	 * Configured for vendor specific message
+	 */
+	[ModelFamily.DEVSTRAL]: devstralConfig,
 	/**
 	 * Next-gen variant - Advanced models with enhanced capabilities
 	 * Includes additional features like feedback loops and web fetching
 	 */
 	[ModelFamily.NEXT_GEN]: nextGenConfig,
+	/**
+	 * Trinity variant - Optimized for Trinity models
+	 * Tool-use optimizations: explicit ask_followup_question question parameter, anti-looping reminder
+	 */
+	[ModelFamily.TRINITY]: trinityConfig,
 	/**
 	 * XS variant - Compact models with limited context windows
 	 * Streamlined for efficiency with essential tools only
