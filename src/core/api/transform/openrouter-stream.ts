@@ -6,6 +6,7 @@ import {
 	openRouterClaudeOpus461mModelId,
 	openRouterClaudeSonnet41mModelId,
 	openRouterClaudeSonnet451mModelId,
+	openRouterClaudeSonnet461mModelId,
 } from "@shared/api"
 import { normalizeOpenaiReasoningEffort } from "@shared/storage/types"
 import { shouldSkipReasoningForModel, supportsReasoningEffortForModel } from "@utils/model-utils"
@@ -34,6 +35,7 @@ export async function createOpenRouterStream(
 	const isClaude1m =
 		model.id === openRouterClaudeSonnet41mModelId ||
 		model.id === openRouterClaudeSonnet451mModelId ||
+		model.id === openRouterClaudeSonnet461mModelId ||
 		model.id === openRouterClaudeOpus461mModelId
 	if (isClaude1m) {
 		// remove the custom :1m suffix, to create the model id openrouter API expects
@@ -50,6 +52,8 @@ export async function createOpenRouterStream(
 		case "anthropic/claude-opus-4.6":
 		case "anthropic/claude-haiku-4.5":
 		case "anthropic/claude-4.5-haiku":
+		case "anthropic/claude-sonnet-4.6":
+		case "anthropic/claude-4.6-sonnet":
 		case "anthropic/claude-sonnet-4.5":
 		case "anthropic/claude-4.5-sonnet": // OpenRouter accidentally included this in model list for a brief moment, and users may be using this model id. And to support prompt caching, we need to add it here.
 		case "anthropic/claude-sonnet-4":
@@ -76,6 +80,7 @@ export async function createOpenRouterStream(
 		case "minimax/minimax-m2":
 		case "minimax/minimax-m2.1":
 		case "minimax/minimax-m2.1-lightning":
+		case "minimax/minimax-m2.5":
 			openAiMessages[0] = {
 				role: "system",
 				content: [
@@ -111,36 +116,6 @@ export async function createOpenRouterStream(
 			break
 	}
 
-	// Not sure how openrouter defaults max tokens when no value is provided, but the anthropic api requires this value and since they offer both 4096 and 8192 variants, we should ensure 8192.
-	// (models usually default to max tokens allowed)
-	let maxTokens: number | undefined
-	switch (model.id) {
-		case "anthropic/claude-opus-4.6":
-		case "anthropic/claude-haiku-4.5":
-		case "anthropic/claude-4.5-haiku":
-		case "anthropic/claude-sonnet-4.5":
-		case "anthropic/claude-4.5-sonnet":
-		case "anthropic/claude-sonnet-4":
-		case "anthropic/claude-opus-4.5":
-		case "anthropic/claude-opus-4.1":
-		case "anthropic/claude-opus-4":
-		case "anthropic/claude-3.7-sonnet":
-		case "anthropic/claude-3.7-sonnet:beta":
-		case "anthropic/claude-3.7-sonnet:thinking":
-		case "anthropic/claude-3-7-sonnet":
-		case "anthropic/claude-3-7-sonnet:beta":
-		case "anthropic/claude-3.5-sonnet":
-		case "anthropic/claude-3.5-sonnet:beta":
-		case "anthropic/claude-3.5-sonnet-20240620":
-		case "anthropic/claude-3.5-sonnet-20240620:beta":
-		case "anthropic/claude-3-5-haiku":
-		case "anthropic/claude-3-5-haiku:beta":
-		case "anthropic/claude-3-5-haiku-20241022":
-		case "anthropic/claude-3-5-haiku-20241022:beta":
-			maxTokens = 8_192
-			break
-	}
-
 	let temperature: number | undefined = 0
 	let topP: number | undefined
 	if (
@@ -154,7 +129,7 @@ export async function createOpenRouterStream(
 		topP = 0.95
 		openAiMessages = convertToR1Format([{ role: "user", content: systemPrompt }, ...messages])
 	}
-	if (model.id.startsWith("google/gemini-3.0") || model.id === "google/gemini-3.0") {
+	if (model.id.startsWith("google/gemini-3")) {
 		// Recommended value from google
 		temperature = 1.0
 	}
@@ -166,6 +141,8 @@ export async function createOpenRouterStream(
 		case "anthropic/claude-opus-4.6":
 		case "anthropic/claude-haiku-4.5":
 		case "anthropic/claude-4.5-haiku":
+		case "anthropic/claude-sonnet-4.6":
+		case "anthropic/claude-4.6-sonnet":
 		case "anthropic/claude-sonnet-4.5":
 		case "anthropic/claude-4.5-sonnet":
 		case "anthropic/claude-sonnet-4":
@@ -206,7 +183,6 @@ export async function createOpenRouterStream(
 
 	const requestPayload: Record<string, unknown> = {
 		model: model.id,
-		max_tokens: maxTokens,
 		temperature: temperature,
 		top_p: topP,
 		messages: openAiMessages,

@@ -71,7 +71,10 @@ import { ClineStorageMessage } from "@/shared/messages/content"
  * @param messages - Array of ClineStorageMessage objects to be converted
  * @returns ResponseInput array containing the transformed messages with proper reasoning pairing
  */
-export function convertToOpenAIResponsesInput(_messages: ClineStorageMessage[]): {
+export function convertToOpenAIResponsesInput(
+	_messages: ClineStorageMessage[],
+	options?: { usePreviousResponseId?: boolean },
+): {
 	input: ResponseInput
 	previousResponseId?: string
 } {
@@ -79,12 +82,17 @@ export function convertToOpenAIResponsesInput(_messages: ClineStorageMessage[]):
 	// When chaining, only send new items after that assistant turn.
 	let previousResponseId: string | undefined
 	let messages = _messages
-	for (let i = _messages.length - 1; i >= 0; i--) {
-		const msg = _messages[i]
-		if (msg.role === "assistant" && msg.id) {
-			previousResponseId = msg.id
-			messages = _messages.slice(i + 1)
-			break
+	if (options?.usePreviousResponseId) {
+		for (let i = _messages.length - 1; i >= 0; i--) {
+			const msg = _messages[i]
+			// Must be less than 24 hours old to be considered for chaining as the previous Id is only valid for 24 hours.
+			// Set to 23 hours to account for any potential delays in processing.
+			const isLessThan23HoursOld = msg.ts ? Date.now() - msg.ts < 23 * 60 * 60 * 1000 : false
+			if (msg.role === "assistant" && msg.id && isLessThan23HoursOld) {
+				previousResponseId = msg.id
+				messages = _messages.slice(i + 1)
+				break
+			}
 		}
 	}
 
