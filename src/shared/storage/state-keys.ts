@@ -18,7 +18,7 @@ import { Mode } from "@shared/storage/types"
 import { TelemetrySetting } from "@shared/TelemetrySetting"
 import { UserInfo } from "@shared/UserInfo"
 import { LanguageModelChatSelector } from "vscode"
-import { BlobStoreSettings } from "./ClineBlobStorage"
+import { type BlobStoreSettings } from "./types"
 
 // ============================================================================
 // SINGLE SOURCE OF TRUTH FOR STORAGE KEYS
@@ -55,6 +55,7 @@ const REMOTE_CONFIG_EXTRA_FIELDS = {
 	previousRemoteMCPServers: { default: undefined as Array<{ name: string; url: string }> | undefined },
 	remoteGlobalRules: { default: undefined as GlobalInstructionsFile[] | undefined },
 	remoteGlobalWorkflows: { default: undefined as GlobalInstructionsFile[] | undefined },
+	remoteGlobalSkills: { default: undefined as GlobalInstructionsFile[] | undefined },
 	blockPersonalRemoteMCPServers: { default: false as boolean },
 	openTelemetryOtlpHeaders: { default: undefined as Record<string, string> | undefined },
 	otlpMetricsHeaders: { default: undefined as Record<string, string> | undefined },
@@ -78,6 +79,7 @@ const GLOBAL_STATE_FIELDS = {
 	},
 	isNewUser: { default: true as boolean },
 	welcomeViewCompleted: { default: undefined as boolean | undefined },
+	cliKanbanMigrationAnnouncementShown: { default: false as boolean },
 	mcpDisplayMode: { default: DEFAULT_MCP_DISPLAY_MODE as McpDisplayMode },
 	workspaceRoots: { default: undefined as WorkspaceRoot[] | undefined },
 	primaryRootIndex: { default: 0 as number },
@@ -88,6 +90,7 @@ const GLOBAL_STATE_FIELDS = {
 	nativeToolCallEnabled: { default: true as boolean },
 	remoteRulesToggles: { default: {} as ClineRulesToggles },
 	remoteWorkflowToggles: { default: {} as ClineRulesToggles },
+	remoteSkillsToggles: { default: {} as ClineRulesToggles },
 	dismissedBanners: { default: [] as Array<{ bannerId: string; dismissedAt: number }> },
 	// Path to worktree that should auto-open Cline sidebar when launched
 	worktreeAutoOpenPath: { default: undefined as string | undefined },
@@ -272,6 +275,8 @@ const USER_SETTINGS_FIELDS = {
 	backgroundEditEnabled: { default: false as boolean },
 	optOutOfRemoteConfig: { default: false as boolean },
 	doubleCheckCompletionEnabled: { default: false as boolean },
+	lazyTeammateModeEnabled: { default: false as boolean },
+	showFeatureTips: { default: true as boolean },
 
 	// OpenTelemetry configuration
 	openTelemetryEnabled: { default: true as boolean },
