@@ -1,5 +1,143 @@
 # Changelog
 
+## [3.87.0]
+
+### Added
+
+- Add MiniMax M3 model support.
+
+### Fixed
+
+- Update VS Code extension dependencies to resolve security issues in `@xmldom/xmldom`, `basic-ftp`, `axios`, `undici`, and other direct/transitive packages.
+
+## [3.86.2]
+
+### Fixed
+
+- Fix `@` file mentions and workspace file search on VS Code 1.122+ by resolving the new bundled `@vscode/ripgrep-universal` per-platform binary layout before falling back to legacy ripgrep paths.
+
+## [3.86.1]
+
+### Fixed
+
+- Fix `@` file mentions failing to find files in some environments (notably VS Code Remote SSH, and after certain VS Code updates) by keeping the file-search fallback alive when the workspace index or bundled ripgrep binary is unavailable.
+
+## [3.86.0]
+
+### Added
+
+- Add Claude Opus 4.8 provider support, including 1M-context variants where available.
+- Add Moonshot Kimi K2.6 model support.
+
+### Fixed
+
+- Show prompt-cache support for Qwen 3.7 Max in the Cline provider.
+- Fix the VS Code nightly publish workflow startup permissions.
+
+### Changed
+
+- Move the VS Code extension project into `apps/vscode`.
+
+## [3.85.0]
+
+### Added
+
+- Add GPT-5.5 support to SAP AI Core.
+- Add DeepSeek V4 Flash and Pro models.
+- Add Gemini 3.5 Flash to Gemini and Vertex providers.
+- Add `/lg-task` URI webhook integration for LG dashboard flows.
+
+### Fixed
+
+- Fix Vertex AI global endpoint handling for Claude models.
+- Route Poolside Laguna models through next-gen prompts and native tool calling.
+
+### Changed
+
+- Update `diff` and `protobufjs` dependencies.
+
+## [3.84.0]
+
+### Added
+
+- Add SAP AI Core support for additional hosted models
+
+### Fixed
+
+- Disable the MCP "Restart Server" button when a server is toggled off.
+
+### Changed
+
+- Remove the Cline Kanban launch modal and bundled demo media from the VS Code extension startup flow.
+
+## [3.83.0]
+
+### Fixed
+
+- Show a clear "Searching..." state in the @-mention file picker
+- Improve @-mention file search performance
+- Allow `write_to_file` to create or overwrite files with empty content.
+- Fix validation failures for MCP servers that require an object.
+- Enable OpenRouter prompt cache control for Qwen models.
+- Update Axios and SAP Connectivity dependencies
+
+### Changed
+
+- Use the VS Code-specific `README.marketplace.md` when packaging and publishing the VS Code extension
+- Add telemetry to @-mention search to help diagnose local, remote, and multi-root workspace search behavior.
+
+## [3.82.0]
+
+### Added
+
+- Restore VS Code foreground terminal support and settings.
+- Add latest OpenAI, SAP AI Core, and Z AI models.
+
+### Fixed
+
+- Fix hook template JSON escaping.
+- Improve ripgrep file search error handling.
+
+### Changed
+
+- Remove hardcoded model lists from docs.
+
+## [3.81.0]
+
+### Added
+
+- Add GPT-5.5 model support for OpenAI Codex subscription users.
+
+### Fixed
+
+- Remove hardcoded "What’s New" fallback items in webview; only remote-configured welcome banners are shown.
+
+### Changed
+
+- Improve cline-core memory diagnostics used by the extension runtime:
+  - enable near-heap-limit heap snapshots
+  - add periodic memory usage logging
+  - log discovered heap snapshots on abnormal exits for easier OOM debugging
+
+## [3.80.0]
+
+### Added
+
+- Wire up remote `globalSkills` from enterprise remote config with full UI, toggle support, and system prompt integration — enterprise-managed skills now appear under a dedicated "Enterprise Skills" section and support `alwaysEnabled` enforcement
+- Onboarding flow now uses dynamically fetched recommended models instead of a hardcoded list, with a fallback to the welcome view on failure
+- Add dedicated "Quota Exceeded" error message in the chat error UI when Cline account spend caps are hit
+
+### Fixed
+
+- Fix OOM crashes during long conversations by setting `--max-old-space-size=8192` for the cline-core Node.js process (was defaulting to ~2 GB)
+- Show detailed error information in the chat error row instead of a generic caught error message
+- Update `axios` to 1.15.0 across all packages
+
+### Changed
+
+- Remove foreground terminal mode — all task command execution now defaults to background mode, removing the VS Code integrated terminal dependency and related settings UI
+- Remove old hardcoded announcement banners
+
 ## [3.79.0]
 
 ### Added
