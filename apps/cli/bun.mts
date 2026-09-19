@@ -85,6 +85,20 @@ const result = await Bun.build({
 	],
 	define: {
 		"process.env.NODE_ENV": '"production"',
+		...(process.env.TELEMETRY_SERVICE_API_KEY
+			? {
+					"process.env.TELEMETRY_SERVICE_API_KEY": defineProcessEnv(
+						"TELEMETRY_SERVICE_API_KEY",
+					),
+				}
+			: {}),
+		...(process.env.ERROR_SERVICE_API_KEY
+			? {
+					"process.env.ERROR_SERVICE_API_KEY": defineProcessEnv(
+						"ERROR_SERVICE_API_KEY",
+					),
+				}
+			: {}),
 		"process.env.OTEL_TELEMETRY_ENABLED": defineProcessEnv(
 			"OTEL_TELEMETRY_ENABLED",
 		),
@@ -95,6 +109,12 @@ const result = await Bun.build({
 			"OTEL_METRICS_EXPORTER",
 		),
 		"process.env.OTEL_LOGS_EXPORTER": defineProcessEnv("OTEL_LOGS_EXPORTER"),
+		"process.env.OTEL_TRACES_EXPORTER": defineProcessEnv(
+			"OTEL_TRACES_EXPORTER",
+		),
+		"process.env.CLINE_TRACE_RECORD_CONTENT": defineProcessEnv(
+			"CLINE_TRACE_RECORD_CONTENT",
+		),
 		"process.env.OTEL_EXPORTER_OTLP_PROTOCOL": defineProcessEnv(
 			"OTEL_EXPORTER_OTLP_PROTOCOL",
 		),
@@ -107,7 +127,7 @@ const result = await Bun.build({
 	},
 	env: "OTEL_*",
 	banner:
-		'import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);',
+		'import { createRequire as __clineCreateRequire } from "node:module"; const require = __clineCreateRequire(import.meta.url);',
 });
 
 if (result.logs.length > 0) {

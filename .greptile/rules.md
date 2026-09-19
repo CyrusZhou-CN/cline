@@ -36,8 +36,13 @@ event names. It exports:
 
 1. Add the constant to `CORE_TELEMETRY_EVENTS`
 2. Add a typed `capture*()` helper alongside it (with a typed `properties` parameter)
-3. Update the Event Catalog section in `DOC.md`
-4. Add a unit test in `core-events.test.ts` asserting the event is dropped when telemetry is opted out
+3. Add a unit test in `core-events.test.ts` asserting the event flows through the
+   opt-out-respecting `capture` path and never `captureRequired` (opt-out is enforced by
+   `OptedOutTelemetryService`, whose `capture` is a no-op — the test convention is
+   "emits X as a normal opt-out-respecting event"). Events that intentionally bypass
+   opt-out must use `captureRequired` and assert that explicitly.
+
+**All events should be named using snake_case and so should their properties**
 
 ## The Activation Funnel
 
@@ -56,8 +61,9 @@ Emission ownership:
 
 - `user.extension_activated`: emitted **once per host process** by host-specific helpers
   (`captureCliExtensionActivated` for the CLI, `captureExtensionActivated` for VS Code).
-- `workspace.initialized` / `workspace.init_error`: emitted by a per-process de-duplicated
-  emitter in `prepareLocalRuntimeBootstrap`. Hosts must NOT re-emit these.
+- `workspace.initialized` / `workspace.init_error`: emitted by a de-duplicated emitter in
+  `prepareLocalRuntimeBootstrap`. A dedicated host emits once per workspace; a shared Hub emits
+  once per client surface and workspace. Hosts must NOT re-emit these.
 - `workspace.path_resolved`: emitted from default tool executors **only when**
   `WorkspaceManager` exposes more than one root.
 - `task.*`: emitted by core session lifecycle code in `sdk/packages/core/src/cline-core/` and
@@ -82,7 +88,7 @@ The CLI accepts `--config <dir>`. The CLI **must** apply `setClineDir(...)` and
 and any other on-disk telemetry state lands under `~/.cline` instead of the user's chosen
 config dir.
 
-The canonical pattern is in `apps/cli/src/main.ts` (PR #357):
+The canonical pattern is in `apps/cli/src/main.ts`:
 
 ```ts
 if (configDir) setClineDir(configDir);
@@ -90,18 +96,31 @@ setHomeDir(homedir());
 captureCliExtensionActivated();   // <-- after dir overrides
 ```
 
-## Hub Daemon Metadata Forwarding
+## Hub Daemon Telemetry
 
-Hosts that spawn a detached `@cline/core/hub/daemon-entry` process must forward telemetry
-metadata into the daemon argv so the daemon can reconstruct an equivalent
-`ITelemetryService`. The expected payload is base64-encoded JSON with snake_case keys:
+The detached hub daemon (`sdk/packages/core/src/hub/daemon/entry.ts`) hosts the
+`LocalRuntimeHost` that emits `task.conversation_turn` and `task.tokens` for every
+hub-backed session, so the daemon must own its own `ITelemetryService`. It builds one via
+`createHubDaemonTelemetry()` (`sdk/packages/core/src/hub/daemon/telemetry.ts`), which
+identifies from the cached cline account (re-resolved periodically, since the daemon often
+starts before login) and flushes on every shutdown path, including startup failure.
 
-```
-{ extension_version, cline_type, platform, platform_version, os_type, os_version, is_remote_workspace }
-```
+The Hub transport forwards the serializable `ExtensionContext.client` and
+`ExtensionContext.user` values with session create/restore requests. The daemon wraps its
+process-owned service with `createClientScopedTelemetryService()` so lifecycle events use the
+originating client's `cline_type`, platform/version, and current account/organization without
+mutating the singleton shared by concurrent clients. Keep canonical task fields named
+`provider` and `model`; do not reintroduce host-specific aliases such as `apiProvider` or
+`modelId` for `task.created`, `task.restarted`, or `task.completed`.
 
-The reference implementation is `apps/vscode/src/hub-daemon.ts` (PR #357). Without this
-forwarding, hub-backed sessions silently drop their lifecycle telemetry.
+`UserContext.distinctId` may be an anonymous machine ID. Set `UserContext.accountId` to the
+authenticated account ID (or `null` for an explicitly signed-out client) whenever a client
+forwards user context; this prevents machine IDs and stale daemon identity from becoming
+`user_id` / `organization_id` on task events.
+
+Flag changes that remove this wiring, construct runtime hosts inside the daemon without
+passing its telemetry handle, or add daemon exit paths that skip the flush — hub-backed
+sessions would silently drop their lifecycle telemetry (this exact bug shipped once).
 
 ## Auth Lifecycle Completeness
 
@@ -120,10 +139,10 @@ canonical examples of all four phases.
 
 ## Single Telemetry Service Per Host
 
-On VS Code, the telemetry handle is built **once** in `activate()`
-(`apps/vscode/src/telemetry.ts`) and the same instance is passed into the sidebar, panel
-command, and daemon spawn payload. Do not let individual controllers construct their own
-`ITelemetryService` — that fragments distinct-id state, opt-out tracking, and flush ownership.
+On VS Code, all callers go through the lazy `telemetryService` proxy in
+`apps/vscode/src/services/telemetry/index.ts`, which constructs the service once on first
+use. Do not let individual controllers construct their own `ITelemetryService` — that
+fragments distinct-id state, opt-out tracking, and flush ownership.
 
 The CLI follows the same pattern via the `getCliTelemetryService()` singleton in
 `apps/cli/src/utils/telemetry.ts`, which is memoized by the activation gate in

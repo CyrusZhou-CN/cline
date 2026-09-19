@@ -1,4 +1,11 @@
 export {
+	getGeneratedModelsForRuntimeProvider,
+	isProviderApiLine,
+	OLLAMA_DEFAULT_CONTEXT_WINDOW,
+	type ProviderApiLine,
+	resolveProviderApiLineBaseUrl,
+} from "./providers/builtins";
+export {
 	type ApiHandler,
 	BUILT_IN_PROVIDER,
 	BUILT_IN_PROVIDER_IDS,
@@ -29,6 +36,34 @@ import {
 } from "./providers/types";
 
 export {
+	classifyProviderError,
+	isRetryableProviderError,
+} from "./providers/error-classification";
+export {
+	ClineFreeModelLimitError,
+	ClineNotSubscribedError,
+	ClineOrgIndividualInferenceSubscriptionError,
+	ClinePassLimitError,
+	extractClineFreeModelLimitResetTime,
+	extractClinePassLimitMessage,
+	getClineNotSubscribedMessage,
+	getClineOrgIndividualInferenceSubscriptionMessage,
+	getClinePassSubscriptionUrl,
+	isClineFreeModelLimitError,
+	isClineFreeModelLimitMessage,
+	isClineModelNotFoundMessage,
+	isClineNotSubscribedError,
+	isClineNotSubscribedMessage,
+	isClineOrgIndividualInferenceSubscriptionError,
+	isClineOrgIndividualInferenceSubscriptionMessage,
+	isClinePassLimitError,
+	isClinePassLimitMessage,
+} from "./providers/errors";
+export {
+	getRegisteredHandler,
+	getRegisteredHandlerAsync,
+	hasRegisteredHandler,
+	isRegisteredHandlerAsync,
 	registerAsyncHandler,
 	registerHandler,
 } from "./providers/factory-registry";

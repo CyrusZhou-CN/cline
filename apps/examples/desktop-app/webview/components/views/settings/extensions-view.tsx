@@ -1,31 +1,73 @@
 "use client";
 
+import { Switch } from "@cline/ui";
 import {
 	Bot,
 	Code,
+	Copy,
 	FileText,
-	FolderOpen,
+	MoreVertical,
 	Play,
 	Puzzle,
 	RefreshCw,
+	Search,
+	Server,
+	Trash2,
 	TriangleAlert,
 	Wrench,
 	Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 import { desktopClient } from "@/lib/desktop-client";
+import type { MarketplacePrimitiveType } from "@/lib/marketplace";
 import { cn } from "@/lib/utils";
+import {
+	MarketplaceEntrySetupDetails,
+	type MarketplaceLocalInstalledItem,
+	type MarketplaceLocalInstalledItemRenderContext,
+	MarketplaceView,
+} from "../marketplace-view";
+import { CommandBadge, PageFrame, PageHeader } from "../page-layout";
 
-type ShortcutTab =
+export type CustomizationSection =
 	| "Rules"
 	| "Hooks"
+	| "MCP"
 	| "Skills"
 	| "Agents"
 	| "Plugins"
 	| "Tools";
+
+const sectionDescriptions: Record<CustomizationSection, string> = {
+	Rules: "Review project and global rule files that shape Cline behavior.",
+	Hooks: "Inspect hook configuration and recent execution status.",
+	MCP: "Manage installed MCP servers and add new servers from the marketplace.",
+	Skills: "Manage installed skills and add new skills from the marketplace.",
+	Agents: "Review configured agents discovered from local settings.",
+	Plugins: "Manage installed plugins and add new plugins from the marketplace.",
+	Tools: "Inspect built-in tools and tools contributed by plugins.",
+};
+
+const sectionCommands: Record<CustomizationSection, string> = {
+	Rules: "cline config rules",
+	Hooks: "cline config hooks",
+	MCP: "cline mcp install",
+	Skills: "cline skill",
+	Agents: "cline config agents",
+	Plugins: "cline plugin",
+	Tools: "cline config tools",
+};
 
 type RuleItem = {
 	name: string;
@@ -45,6 +87,9 @@ type SkillItem = {
 	description?: string;
 	instructions: string;
 	path: string;
+	enabled?: boolean;
+	agentPlugin?: boolean;
+	pluginName?: string;
 };
 
 type CommandItem = {
@@ -53,8 +98,14 @@ type CommandItem = {
 	name: string;
 	description?: string;
 	instructions: string;
+	enabled?: boolean;
 	path: string;
+	scope: ItemScope;
+	agentPlugin?: boolean;
+	pluginName?: string;
 };
+
+type ItemScope = "Global" | "Project";
 
 type AgentItem = {
 	name: string;
@@ -62,9 +113,28 @@ type AgentItem = {
 };
 
 type PluginItem = {
+	id: string;
 	name: string;
 	path: string;
 	enabled: boolean;
+	source?: string;
+	toggleable?: boolean;
+	agentPlugin?: boolean;
+	description?: string;
+	loadError?: string;
+	contributions?: PluginContributions;
+};
+
+type PluginContributions = {
+	inspectionStatus?: "available" | "disabled" | "failed";
+	capabilities: string[];
+	tools: string[];
+	skills: string[];
+	rules: string[];
+	hooks: string[];
+	commands: string[];
+	mcpServers: string[];
+	providers: string[];
 };
 
 type ToolItem = {
@@ -77,6 +147,22 @@ type ToolItem = {
 	pluginName?: string;
 	headlessToolNames?: string[];
 };
+
+function toolMatchesQuery(tool: ToolItem, normalizedQuery: string): boolean {
+	if (!normalizedQuery) {
+		return true;
+	}
+	const haystacks = [
+		tool.name,
+		tool.description,
+		tool.pluginName,
+		tool.path,
+		...(tool.headlessToolNames ?? []),
+	];
+	return haystacks.some((value) =>
+		value?.toLowerCase().includes(normalizedQuery),
+	);
+}
 
 type HookItem = {
 	fileName: string;
@@ -118,6 +204,16 @@ type McpServersResponse = {
 	servers: McpServer[];
 };
 
+type LocalUninstallType = "mcp" | "skill" | "workflow" | "plugin" | "rule";
+
+type LocalUninstallTarget = {
+	key: string;
+	type: LocalUninstallType;
+	id?: string;
+	name?: string;
+	path?: string;
+};
+
 type UserInstructionListsResponse = {
 	workspaceRoot: string;
 	rules: RuleItem[];
@@ -129,6 +225,12 @@ type UserInstructionListsResponse = {
 	hooks: HookItem[];
 	mcp: McpServersResponse;
 	warnings: string[];
+};
+
+const EMPTY_MCP_RESPONSE: McpServersResponse = {
+	settingsPath: "",
+	hasSettingsFile: false,
+	servers: [],
 };
 
 function asArray<T>(value: T[] | null | undefined): T[] {
@@ -159,9 +261,7 @@ function normalizeInstructionListsResponse(
 						servers: asArray(response.mcp.servers),
 					}
 				: {
-						settingsPath: "",
-						hasSettingsFile: false,
-						servers: [],
+						...EMPTY_MCP_RESPONSE,
 					},
 		warnings: asArray(response?.warnings),
 	};
@@ -181,6 +281,31 @@ let extensionHookStatsCache: {
 	hookExecutionSessionId: string | null;
 	fetchedAt: number;
 } | null = null;
+
+const extensionInventoryInvalidationListeners = new Set<() => void>();
+
+/**
+ * Drops the module-level inventory cache and notifies mounted inventory views
+ * so they refetch immediately. Used by the Marketplace page after
+ * installs/uninstalls that happen outside these views — including ones that
+ * complete after the user has already navigated back to the Plugins hub.
+ */
+export function invalidateExtensionInventoryCache() {
+	extensionListsCache = null;
+	for (const listener of extensionInventoryInvalidationListeners) {
+		listener();
+	}
+}
+
+/** Subscribe to inventory invalidations; returns an unsubscribe function. */
+export function subscribeToExtensionInventoryInvalidation(
+	listener: () => void,
+): () => void {
+	extensionInventoryInvalidationListeners.add(listener);
+	return () => {
+		extensionInventoryInvalidationListeners.delete(listener);
+	};
+}
 
 function hasFreshExtensionsListsCache(
 	cache: typeof extensionListsCache,
@@ -206,6 +331,43 @@ function normalizePath(path: string): string {
 	return path.replaceAll("\\", "/");
 }
 
+function getPathScope(path: string, workspaceRoot: string): ItemScope {
+	const normalizedRoot = normalizePath(workspaceRoot);
+	const normalized = normalizePath(path);
+	return normalizedRoot && normalized.startsWith(`${normalizedRoot}/`)
+		? "Project"
+		: "Global";
+}
+
+function ScopeBadge({ scope }: { scope: ItemScope }) {
+	return (
+		<Badge variant="outline" className="shrink-0 text-muted-foreground">
+			{scope}
+		</Badge>
+	);
+}
+
+function getLocalMarketplaceMatchValues(
+	...values: Array<string | undefined>
+): string[] {
+	const matchValues = new Set<string>();
+	for (const value of values) {
+		const normalized = value?.trim().replaceAll("\\", "/");
+		if (!normalized) {
+			continue;
+		}
+		matchValues.add(normalized);
+		const segments = normalized.split("/").filter(Boolean);
+		for (const segment of segments) {
+			matchValues.add(segment.replace(/\.[^.]+$/, ""));
+		}
+		for (let index = 0; index < segments.length - 1; index += 1) {
+			matchValues.add(`${segments[index]}/${segments[index + 1]}`);
+		}
+	}
+	return [...matchValues];
+}
+
 async function fetchUserInstructionLists(): Promise<UserInstructionListsResponse> {
 	const response = await desktopClient.invoke<
 		Partial<UserInstructionListsResponse>
@@ -213,25 +375,25 @@ async function fetchUserInstructionLists(): Promise<UserInstructionListsResponse
 	return normalizeInstructionListsResponse(response);
 }
 
-function isUnsupportedDesktopCommand(error: unknown, command: string): boolean {
-	const message = error instanceof Error ? error.message : String(error);
-	return message.includes(`unsupported desktop command: ${command}`);
-}
-
-export async function primeExtensionsListsCache(): Promise<void> {
-	const now = Date.now();
-	if (hasFreshExtensionsListsCache(extensionListsCache, now)) {
-		return;
-	}
-	const response = await fetchUserInstructionLists();
-	extensionListsCache = {
-		...response,
-		fetchedAt: now,
-	};
-}
-
-export function RulesView() {
-	const [activeTab, setActiveTab] = useState<ShortcutTab>("Rules");
+export function CustomizationSectionView({
+	catalogPrimitive,
+	chrome = "page",
+	marketplaceVariant = "full",
+	onInventoryChanged,
+	section = "Rules",
+	showTabs = false,
+}: {
+	catalogPrimitive?: MarketplacePrimitiveType;
+	/** "embedded" renders without the page frame/header for use inside the Plugins hub. */
+	chrome?: "page" | "embedded";
+	/** Which marketplace sections the embedded MarketplaceView shows. */
+	marketplaceVariant?: "full" | "installed";
+	/** Invoked after a forced inventory refresh (installs, uninstalls). */
+	onInventoryChanged?: () => void;
+	section?: CustomizationSection;
+	showTabs?: boolean;
+}) {
+	const [activeTab, setActiveTab] = useState<CustomizationSection>(section);
 	const [isLoading, setIsLoading] = useState(
 		() => !hasFreshExtensionsListsCache(extensionListsCache, Date.now()),
 	);
@@ -260,6 +422,9 @@ export function RulesView() {
 	const [hooks, setHooks] = useState<HookItem[]>(
 		() => extensionListsCache?.hooks ?? [],
 	);
+	const [mcp, setMcp] = useState<McpServersResponse>(
+		() => extensionListsCache?.mcp ?? EMPTY_MCP_RESPONSE,
+	);
 	const [warnings, setWarnings] = useState<string[]>(
 		() => extensionListsCache?.warnings ?? [],
 	);
@@ -273,51 +438,73 @@ export function RulesView() {
 	const [togglingToolIds, setTogglingToolIds] = useState<Set<string>>(
 		() => new Set(),
 	);
+	const [toolsSearchQuery, setToolsSearchQuery] = useState("");
 	const [togglingPluginPaths, setTogglingPluginPaths] = useState<Set<string>>(
 		() => new Set(),
 	);
+	const [togglingSkillPaths, setTogglingSkillPaths] = useState<Set<string>>(
+		() => new Set(),
+	);
+	const [localUninstallingKeys, setLocalUninstallingKeys] = useState<
+		Set<string>
+	>(() => new Set());
+	const [localActionMessages, setLocalActionMessages] = useState<
+		Map<string, { status: "success" | "failed"; message: string }>
+	>(() => new Map());
 
-	const refresh = useCallback(async (force = false) => {
-		const now = Date.now();
-		if (!force && hasFreshExtensionsListsCache(extensionListsCache, now)) {
-			setWorkspaceRoot(extensionListsCache.workspaceRoot);
-			setRules(extensionListsCache.rules);
-			setWorkflows(extensionListsCache.workflows);
-			setSkills(extensionListsCache.skills);
-			setAgents(extensionListsCache.agents);
-			setPlugins(extensionListsCache.plugins);
-			setTools(extensionListsCache.tools);
-			setHooks(extensionListsCache.hooks);
-			setWarnings(extensionListsCache.warnings);
+	useEffect(() => {
+		setActiveTab(section);
+	}, [section]);
+
+	const refresh = useCallback(
+		async (force = false) => {
+			const now = Date.now();
+			if (!force && hasFreshExtensionsListsCache(extensionListsCache, now)) {
+				setWorkspaceRoot(extensionListsCache.workspaceRoot);
+				setRules(extensionListsCache.rules);
+				setWorkflows(extensionListsCache.workflows);
+				setSkills(extensionListsCache.skills);
+				setAgents(extensionListsCache.agents);
+				setPlugins(extensionListsCache.plugins);
+				setTools(extensionListsCache.tools);
+				setHooks(extensionListsCache.hooks);
+				setMcp(extensionListsCache.mcp);
+				setWarnings(extensionListsCache.warnings);
+				setErrorMessage(null);
+				setIsLoading(false);
+				return;
+			}
+
+			setIsLoading(true);
 			setErrorMessage(null);
-			setIsLoading(false);
-			return;
-		}
-
-		setIsLoading(true);
-		setErrorMessage(null);
-		try {
-			const response = await fetchUserInstructionLists();
-			setWorkspaceRoot(response.workspaceRoot);
-			setRules(response.rules);
-			setWorkflows(response.workflows);
-			setSkills(response.skills);
-			setAgents(response.agents);
-			setPlugins(response.plugins);
-			setTools(response.tools);
-			setHooks(response.hooks);
-			setWarnings(response.warnings);
-			extensionListsCache = {
-				...response,
-				fetchedAt: Date.now(),
-			};
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			setErrorMessage(message);
-		} finally {
-			setIsLoading(false);
-		}
-	}, []);
+			try {
+				const response = await fetchUserInstructionLists();
+				setWorkspaceRoot(response.workspaceRoot);
+				setRules(response.rules);
+				setWorkflows(response.workflows);
+				setSkills(response.skills);
+				setAgents(response.agents);
+				setPlugins(response.plugins);
+				setTools(response.tools);
+				setHooks(response.hooks);
+				setMcp(response.mcp);
+				setWarnings(response.warnings);
+				extensionListsCache = {
+					...response,
+					fetchedAt: Date.now(),
+				};
+				if (force) {
+					onInventoryChanged?.();
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				setErrorMessage(message);
+			} finally {
+				setIsLoading(false);
+			}
+		},
+		[onInventoryChanged],
+	);
 
 	const loadHookExecutionStats = useCallback(async (force = false) => {
 		const now = Date.now();
@@ -408,6 +595,7 @@ export function RulesView() {
 			setPlugins(normalizedResponse.plugins);
 			setTools(normalizedResponse.tools);
 			setHooks(normalizedResponse.hooks);
+			setMcp(normalizedResponse.mcp);
 			setWarnings(normalizedResponse.warnings);
 			extensionListsCache = {
 				...normalizedResponse,
@@ -428,31 +616,11 @@ export function RulesView() {
 				if (names.length === 0) {
 					throw new Error("tool name is required");
 				}
-				let response: UserInstructionListsResponse | undefined;
-				try {
-					response = await desktopClient.invoke<UserInstructionListsResponse>(
+				const response =
+					await desktopClient.invoke<UserInstructionListsResponse>(
 						"set_tool_disabled",
-						{
-							names,
-							disabled: tool.enabled,
-						},
+						{ names, disabled: tool.enabled },
 					);
-				} catch (error) {
-					if (!isUnsupportedDesktopCommand(error, "set_tool_disabled")) {
-						throw error;
-					}
-					for (const name of names) {
-						response = await desktopClient.invoke<UserInstructionListsResponse>(
-							"toggle_disabled_plugin_tool",
-							{ name },
-						);
-					}
-				}
-				if (!response) {
-					throw new Error(
-						"tool toggle did not return an updated extension list",
-					);
-				}
 				applyResponse(response);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -461,6 +629,50 @@ export function RulesView() {
 				setTogglingToolIds((current) => {
 					const next = new Set(current);
 					next.delete(tool.id);
+					return next;
+				});
+			}
+		},
+		[applyResponse],
+	);
+
+	const setAllToolsEnabled = useCallback(
+		async (toolsList: ToolItem[], enabled: boolean) => {
+			const targets = toolsList.filter((tool) => !enabled || !tool.enabled);
+			if (targets.length === 0) {
+				return;
+			}
+			const targetIds = targets.map((tool) => tool.id);
+			setTogglingToolIds((current) => {
+				const next = new Set(current);
+				for (const id of targetIds) {
+					next.add(id);
+				}
+				return next;
+			});
+			setErrorMessage(null);
+			try {
+				const names = targets.flatMap((tool) =>
+					[tool.name, ...(tool.headlessToolNames ?? [])].filter(Boolean),
+				);
+				if (names.length === 0) {
+					throw new Error("tool name is required");
+				}
+				const response =
+					await desktopClient.invoke<UserInstructionListsResponse>(
+						"set_tool_disabled",
+						{ names, disabled: !enabled },
+					);
+				applyResponse(response);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				setErrorMessage(message);
+			} finally {
+				setTogglingToolIds((current) => {
+					const next = new Set(current);
+					for (const id of targetIds) {
+						next.delete(id);
+					}
 					return next;
 				});
 			}
@@ -496,6 +708,86 @@ export function RulesView() {
 		[applyResponse],
 	);
 
+	const setSkillEnabled = useCallback(
+		async (skill: CommandItem) => {
+			setTogglingSkillPaths((current) => new Set(current).add(skill.path));
+			setErrorMessage(null);
+			try {
+				const response =
+					await desktopClient.invoke<UserInstructionListsResponse>(
+						"set_skill_disabled",
+						{
+							path: skill.path,
+							disabled: skill.enabled !== false,
+						},
+					);
+				applyResponse(response);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				setErrorMessage(message);
+			} finally {
+				setTogglingSkillPaths((current) => {
+					const next = new Set(current);
+					next.delete(skill.path);
+					return next;
+				});
+			}
+		},
+		[applyResponse],
+	);
+
+	const uninstallLocalPrimitive = useCallback(
+		async (target: LocalUninstallTarget) => {
+			if (localUninstallingKeys.has(target.key)) {
+				return;
+			}
+			setLocalUninstallingKeys((current) => new Set(current).add(target.key));
+			setLocalActionMessages((current) => {
+				const next = new Map(current);
+				next.delete(target.key);
+				return next;
+			});
+			setErrorMessage(null);
+			try {
+				const result = await desktopClient.invoke<{ message?: string }>(
+					"uninstall_local_primitive",
+					{
+						type: target.type,
+						id: target.id,
+						name: target.name,
+						path: target.path,
+					},
+				);
+				setLocalActionMessages((current) => {
+					const next = new Map(current);
+					next.set(target.key, {
+						status: "success",
+						message:
+							result.message ??
+							`Uninstalled ${target.name ?? target.id ?? target.path}.`,
+					});
+					return next;
+				});
+				await refresh(true);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				setLocalActionMessages((current) => {
+					const next = new Map(current);
+					next.set(target.key, { status: "failed", message });
+					return next;
+				});
+				setErrorMessage(message);
+			} finally {
+				setLocalUninstallingKeys((current) => {
+					const next = new Set(current);
+					next.delete(target.key);
+					return next;
+				});
+			}
+		},
+		[localUninstallingKeys, refresh],
+	);
+
 	const formatExecutionTs = useCallback((value: string | null): string => {
 		if (!value) {
 			return "never";
@@ -511,17 +803,34 @@ export function RulesView() {
 	}, []);
 
 	useEffect(() => {
-		void refresh(false);
+		const timeoutId = window.setTimeout(() => {
+			void refresh(false);
+		}, 0);
+		return () => window.clearTimeout(timeoutId);
 	}, [refresh]);
+
+	// Marketplace installs/uninstalls can complete after this view mounted
+	// (e.g. the user navigated back to Plugins mid-install); refetch when the
+	// shared inventory cache is invalidated so the list is never stale.
+	useEffect(
+		() =>
+			subscribeToExtensionInventoryInvalidation(() => {
+				void refresh(true);
+			}),
+		[refresh],
+	);
 
 	useEffect(() => {
 		if (activeTab !== "Hooks") {
 			return;
 		}
-		void loadHookExecutionStats(false);
+		const timeoutId = window.setTimeout(() => {
+			void loadHookExecutionStats(false);
+		}, 0);
+		return () => window.clearTimeout(timeoutId);
 	}, [activeTab, loadHookExecutionStats]);
 
-	const tabs: ShortcutTab[] = [
+	const tabs: CustomizationSection[] = [
 		"Rules",
 		"Hooks",
 		"Skills",
@@ -537,6 +846,7 @@ export function RulesView() {
 			name: workflow.name,
 			instructions: workflow.instructions,
 			path: workflow.path,
+			scope: getPathScope(workflow.path, workspaceRoot),
 		}));
 		const skillItems: CommandItem[] = skills.map((skill) => ({
 			id: normalizePath(skill.path).toLowerCase(),
@@ -544,23 +854,32 @@ export function RulesView() {
 			name: skill.name,
 			description: skill.description,
 			instructions: skill.instructions,
+			enabled: skill.enabled,
 			path: skill.path,
+			scope: getPathScope(skill.path, workspaceRoot),
+			agentPlugin: skill.agentPlugin,
+			pluginName: skill.pluginName,
 		}));
 		return [...workflowItems, ...skillItems].sort((a, b) =>
 			a.name.localeCompare(b.name),
 		);
-	}, [skills, workflows]);
+	}, [skills, workflows, workspaceRoot]);
 
 	const { projectRules, globalRules } = useMemo(() => {
-		const normalizedRoot = normalizePath(workspaceRoot);
+		const normalizedRoot = normalizePath(workspaceRoot).replace(/\/+$/, "");
+		const workspaceRuleRoots = workspaceRoot
+			? [`${normalizedRoot}/.clinerules`, `${normalizedRoot}/.cline/rules`]
+			: [];
 		const project: RuleItem[] = [];
 		const global: RuleItem[] = [];
 		for (const rule of rules) {
 			const normalized = normalizePath(rule.path);
+			// Only the workspace's rule roots are local, not similarly named
+			// directories elsewhere beneath it. Equality also covers single-file rules.
 			if (
-				normalizedRoot &&
-				normalized.startsWith(`${normalizedRoot}/`) &&
-				normalized.includes("/.clinerules/")
+				workspaceRuleRoots.some(
+					(root) => normalized === root || normalized.startsWith(`${root}/`),
+				)
 			) {
 				project.push(rule);
 			} else {
@@ -596,9 +915,11 @@ export function RulesView() {
 		for (const plugin of plugins) {
 			const normalized = normalizePath(plugin.path);
 			if (
-				normalizedRoot &&
-				normalized.startsWith(`${normalizedRoot}/`) &&
-				normalized.includes("/.cline/plugins")
+				plugin.source === "workspace-plugin" ||
+				(normalizedRoot &&
+					normalized.startsWith(`${normalizedRoot}/`) &&
+					(normalized.includes("/.cline/plugins") ||
+						normalized.includes("/.agents/plugins")))
 			) {
 				project.push(plugin);
 			} else {
@@ -609,17 +930,23 @@ export function RulesView() {
 	}, [plugins, workspaceRoot]);
 
 	const builtinTools = useMemo(
-		() => tools.filter((tool) => tool.source === "builtin"),
+		() =>
+			tools
+				.filter((tool) => tool.source === "builtin")
+				.sort((a, b) => a.name.localeCompare(b.name)),
 		[tools],
 	);
 	const pluginTools = useMemo(
-		() => tools.filter((tool) => tool.source !== "builtin"),
+		() =>
+			tools
+				.filter((tool) => tool.source !== "builtin")
+				.sort((a, b) => a.name.localeCompare(b.name)),
 		[tools],
 	);
 	const pluginToolsByPluginKey = useMemo(() => {
 		const grouped = new Map<string, ToolItem[]>();
 		for (const tool of pluginTools) {
-			const key = `${tool.pluginName ?? ""}:${tool.path ?? ""}`;
+			const key = tool.path ?? "";
 			const existing = grouped.get(key) ?? [];
 			existing.push(tool);
 			grouped.set(key, existing);
@@ -629,28 +956,485 @@ export function RulesView() {
 		}
 		return grouped;
 	}, [pluginTools]);
+	const normalizedToolsSearchQuery = toolsSearchQuery.trim().toLowerCase();
+	const filteredBuiltinTools = useMemo(
+		() =>
+			builtinTools.filter((tool) =>
+				toolMatchesQuery(tool, normalizedToolsSearchQuery),
+			),
+		[builtinTools, normalizedToolsSearchQuery],
+	);
+	const filteredPluginTools = useMemo(
+		() =>
+			pluginTools.filter((tool) =>
+				toolMatchesQuery(tool, normalizedToolsSearchQuery),
+			),
+		[pluginTools, normalizedToolsSearchQuery],
+	);
+	const allBuiltinToolsEnabled = useMemo(
+		() =>
+			filteredBuiltinTools.length > 0 &&
+			filteredBuiltinTools.every((tool) => tool.enabled),
+		[filteredBuiltinTools],
+	);
+	const allPluginToolsEnabled = useMemo(
+		() =>
+			filteredPluginTools.length > 0 &&
+			filteredPluginTools.every((tool) => tool.enabled),
+		[filteredPluginTools],
+	);
 
-	return (
-		<ScrollArea className="h-full">
-			<div className="mx-auto max-w-3xl px-8 py-6">
-				<div className="mb-4 flex items-center justify-between">
-					<h2 className="text-lg font-semibold text-foreground">Extensions</h2>
+	const scopedPlugins = useMemo(
+		() => [
+			...globalPlugins.map((plugin) => ({
+				plugin,
+				scope: "Global" as ItemScope,
+			})),
+			...projectPlugins.map((plugin) => ({
+				plugin,
+				scope: "Project" as ItemScope,
+			})),
+		],
+		[globalPlugins, projectPlugins],
+	);
+	const clinePlugins = useMemo(
+		() => scopedPlugins.filter(({ plugin }) => plugin.agentPlugin !== true),
+		[scopedPlugins],
+	);
+	const agentPlugins = useMemo(
+		() => scopedPlugins.filter(({ plugin }) => plugin.agentPlugin === true),
+		[scopedPlugins],
+	);
+
+	const scopedRules = useMemo(
+		() => [
+			...globalRules.map((rule) => ({ rule, scope: "Global" as ItemScope })),
+			...projectRules.map((rule) => ({ rule, scope: "Project" as ItemScope })),
+		],
+		[globalRules, projectRules],
+	);
+
+	const scopedHooks = useMemo(
+		() => [
+			...globalHooks.map((hook) => ({ hook, scope: "Global" as ItemScope })),
+			...projectHooks.map((hook) => ({ hook, scope: "Project" as ItemScope })),
+		],
+		[globalHooks, projectHooks],
+	);
+
+	const renderLocalActionMessage = (key: string) => {
+		const message = localActionMessages.get(key);
+		if (!message) {
+			return null;
+		}
+		return (
+			<output
+				className={cn(
+					"text-xs",
+					message.status === "failed"
+						? "text-destructive"
+						: "text-muted-foreground",
+				)}
+			>
+				{message.message}
+			</output>
+		);
+	};
+
+	// Sized and styled to match the Install/Uninstall button on marketplace
+	// entry cards so installed rows and browse rows read as one list.
+	const renderLocalActionButton = (target: LocalUninstallTarget) => {
+		const uninstalling = localUninstallingKeys.has(target.key);
+		return (
+			<Button
+				disabled={uninstalling}
+				onClick={() => {
+					void uninstallLocalPrimitive(target);
+				}}
+				size="xs"
+				type="button"
+				variant="destructive"
+			>
+				{uninstalling ? <Spinner /> : <Trash2 className="size-4" />}
+				{uninstalling ? "Uninstalling..." : "Uninstall"}
+			</Button>
+		);
+	};
+
+	const renderLocalItemMenu = (
+		target: LocalUninstallTarget,
+		options: { showDelete?: boolean } = {},
+	) => {
+		const { showDelete = true } = options;
+		const uninstalling = localUninstallingKeys.has(target.key);
+		return (
+			<DropdownMenu>
+				<DropdownMenuTrigger asChild>
 					<Button
-						variant="outline"
-						size="sm"
-						onClick={() => {
-							void refresh(true);
-							if (activeTab === "Hooks") {
-								void loadHookExecutionStats(true);
-							}
-						}}
-						disabled={isLoading}
+						aria-label={`More actions for ${target.name ?? "plugin"}`}
+						className="m-0 size-auto shrink-0 p-0 text-muted-foreground"
+						onClick={(event) => event.stopPropagation()}
+						size="icon"
+						type="button"
+						variant="ghost"
 					>
-						<RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
-						Refresh
+						<MoreVertical className="size-4" />
 					</Button>
-				</div>
+				</DropdownMenuTrigger>
+				<DropdownMenuContent align="end">
+					<DropdownMenuItem
+						onClick={() =>
+							void navigator.clipboard.writeText(target.path ?? "")
+						}
+					>
+						<Copy className="size-4" />
+						Copy path
+					</DropdownMenuItem>
+					{showDelete ? (
+						<DropdownMenuItem
+							className="text-destructive focus:text-destructive"
+							disabled={uninstalling}
+							onClick={() => void uninstallLocalPrimitive(target)}
+						>
+							{uninstalling ? <Spinner /> : <Trash2 className="size-4" />}
+							{uninstalling ? "Uninstalling..." : "Uninstall"}
+						</DropdownMenuItem>
+					) : null}
+				</DropdownMenuContent>
+			</DropdownMenu>
+		);
+	};
 
+	const renderSkillCard = (
+		item: CommandItem,
+		context?: MarketplaceLocalInstalledItemRenderContext,
+	) => {
+		const key = `${item.type}:${item.path}`;
+		return (
+			<div
+				key={key}
+				className="grid min-w-0 gap-2 rounded-lg border bg-card p-4"
+			>
+				<div className="flex min-w-0 items-center gap-2">
+					{item.type === "workflow" ? (
+						<Play className="h-4 w-4 shrink-0 text-primary" />
+					) : (
+						<Zap className="h-4 w-4 shrink-0 text-primary" />
+					)}
+					<h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+						{item.name}
+					</h3>
+					<ScopeBadge scope={item.scope} />
+					<Badge variant="outline" className="shrink-0 text-muted-foreground">
+						{item.type}
+					</Badge>
+					{item.agentPlugin === true ? (
+						<Badge variant="outline" className="shrink-0 text-muted-foreground">
+							Agent Plugin
+						</Badge>
+					) : null}
+					{context?.matchedEntries?.length ? (
+						<Badge variant="outline" className="shrink-0 text-muted-foreground">
+							Marketplace
+						</Badge>
+					) : null}
+					<Switch
+						checked={item.enabled !== false}
+						onCheckedChange={() => {
+							void setSkillEnabled(item);
+						}}
+						disabled={
+							item.type === "workflow" ||
+							item.agentPlugin === true ||
+							togglingSkillPaths.has(item.path)
+						}
+						title={
+							item.type === "workflow"
+								? "Toggling workflows isn't supported yet"
+								: undefined
+						}
+						aria-label={`Toggle ${item.name}`}
+					/>
+					{item.agentPlugin !== true
+						? renderLocalItemMenu({
+								key,
+								type: item.type,
+								id: item.id,
+								name: item.name,
+								path: item.path,
+							})
+						: null}
+				</div>
+				<p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+					{item.description?.trim() || previewText(item.instructions)}
+				</p>
+				<p className="truncate text-xs font-mono text-muted-foreground">
+					{item.path}
+				</p>
+				{context?.matchedEntries?.length ? (
+					<MarketplaceEntrySetupDetails entries={context.matchedEntries} />
+				) : null}
+				{renderLocalActionMessage(key)}
+			</div>
+		);
+	};
+
+	const renderPluginCard = (
+		{
+			plugin,
+			scope,
+		}: {
+			plugin: PluginItem;
+			scope: ItemScope;
+		},
+		context?: MarketplaceLocalInstalledItemRenderContext,
+	) => {
+		const key = plugin.path;
+		const contributionGroups = [
+			{
+				label: "Tools",
+				items:
+					plugin.contributions?.tools ??
+					(pluginToolsByPluginKey.get(plugin.path) ?? []).map(
+						(tool) => tool.name,
+					),
+			},
+			{ label: "Skills", items: plugin.contributions?.skills ?? [] },
+			{ label: "Rules", items: plugin.contributions?.rules ?? [] },
+			{ label: "Hooks", items: plugin.contributions?.hooks ?? [] },
+			{ label: "Commands", items: plugin.contributions?.commands ?? [] },
+			{ label: "MCP servers", items: plugin.contributions?.mcpServers ?? [] },
+			{ label: "Providers", items: plugin.contributions?.providers ?? [] },
+			{
+				label: "Capabilities",
+				items: plugin.contributions?.capabilities ?? [],
+			},
+		].filter((group) => group.items.length > 0);
+		return (
+			<details key={plugin.path} className="rounded-lg border bg-card p-4">
+				<summary className="flex cursor-pointer list-none items-center gap-2">
+					<Puzzle className="h-4 w-4 shrink-0 text-primary" />
+					<h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+						{plugin.name}
+					</h3>
+					<ScopeBadge scope={scope} />
+					<Badge variant="outline" className="shrink-0 text-muted-foreground">
+						{plugin.agentPlugin === true ? "Agent Plugin" : "Cline Plugin"}
+					</Badge>
+					{context?.matchedEntries?.length ? (
+						<Badge variant="outline" className="shrink-0 text-muted-foreground">
+							Marketplace
+						</Badge>
+					) : null}
+					<Switch
+						checked={plugin.enabled}
+						onCheckedChange={() => {
+							void setPluginEnabled(plugin);
+						}}
+						onClick={(event) => event.stopPropagation()}
+						disabled={
+							plugin.toggleable === false ||
+							togglingPluginPaths.has(plugin.path)
+						}
+						aria-label={`Toggle ${plugin.name}`}
+					/>
+					{plugin.agentPlugin !== true
+						? renderLocalItemMenu({
+								key,
+								type: "plugin",
+								id: plugin.name,
+								name: plugin.name,
+								path: plugin.path,
+							})
+						: null}
+				</summary>
+				<div className="mt-3">
+					{plugin.description?.trim() ? (
+						<p className="mb-2 whitespace-pre-line text-xs text-muted-foreground">
+							{plugin.description}
+						</p>
+					) : null}
+					{plugin.loadError?.trim() ? (
+						<p className="mb-2 whitespace-pre-line text-xs text-destructive">
+							{plugin.loadError}
+						</p>
+					) : null}
+					{plugin.contributions?.inspectionStatus === "disabled" ? (
+						<p className="mb-2 text-xs text-muted-foreground">
+							Enable this plugin to inspect its dynamic contributions.
+						</p>
+					) : null}
+					{contributionGroups.length > 0 ? (
+						<div>
+							<div className="flex flex-wrap items-center gap-2 py-2 text-xs font-medium text-foreground">
+								<span className="mr-1">Contributions</span>
+								{contributionGroups.map((group) => (
+									<Badge key={group.label} variant="outline">
+										{group.label} {group.items.length}
+									</Badge>
+								))}
+							</div>
+							<div className="grid max-h-56 gap-3 overflow-y-auto pt-2 sm:grid-cols-2">
+								{contributionGroups.map((group) => (
+									<div key={group.label} className="min-w-0">
+										<p className="mb-1 text-xs font-medium text-muted-foreground">
+											{group.label}
+										</p>
+										<div className="flex flex-wrap gap-1">
+											{group.items.map((item) => (
+												<Badge key={item} variant="secondary">
+													{item}
+												</Badge>
+											))}
+										</div>
+									</div>
+								))}
+							</div>
+						</div>
+					) : (
+						<p className="text-xs text-muted-foreground">
+							No plugin contributions found.
+						</p>
+					)}
+				</div>
+				{context?.matchedEntries?.length ? (
+					<div className="mt-2">
+						<MarketplaceEntrySetupDetails entries={context.matchedEntries} />
+					</div>
+				) : null}
+				{renderLocalActionMessage(key) ? (
+					<div className="mt-3">{renderLocalActionMessage(key)}</div>
+				) : null}
+			</details>
+		);
+	};
+
+	const renderMcpServerCard = (
+		server: McpServer,
+		context?: MarketplaceLocalInstalledItemRenderContext,
+	) => {
+		const key = server.name;
+		return (
+			<div
+				key={server.name}
+				className="relative grid min-w-0 gap-2 rounded-lg border bg-card p-4"
+			>
+				<div className="absolute top-4 right-4">
+					{renderLocalActionButton({
+						key,
+						type: "mcp",
+						id: server.name,
+						name: server.name,
+					})}
+				</div>
+				<div className="flex min-w-0 items-center gap-2 pr-28">
+					<Server className="h-4 w-4 shrink-0 text-primary" />
+					<h3 className="min-w-0 truncate text-sm font-semibold text-foreground">
+						{server.name}
+					</h3>
+					<ScopeBadge scope="Global" />
+					<Badge variant="outline" className="shrink-0 text-muted-foreground">
+						{server.transportType}
+					</Badge>
+					{context?.matchedEntries?.length ? (
+						<Badge variant="outline" className="shrink-0 text-muted-foreground">
+							Marketplace
+						</Badge>
+					) : null}
+					{server.disabled ? (
+						<Badge variant="outline" className="shrink-0 text-muted-foreground">
+							Disabled
+						</Badge>
+					) : null}
+				</div>
+				<p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+					{server.url ??
+						([server.command, ...(server.args ?? [])]
+							.filter(Boolean)
+							.join(" ") ||
+							"No launch command configured.")}
+				</p>
+				{mcp.settingsPath ? (
+					<p className="truncate text-xs font-mono text-muted-foreground">
+						{mcp.settingsPath}
+					</p>
+				) : null}
+				{context?.matchedEntries?.length ? (
+					<MarketplaceEntrySetupDetails entries={context.matchedEntries} />
+				) : null}
+				{renderLocalActionMessage(key)}
+			</div>
+		);
+	};
+
+	const installedCatalogLocalItems =
+		catalogPrimitive === "skill"
+			? commandItems.map(
+					(item): MarketplaceLocalInstalledItem => ({
+						key: `${item.type}:${item.path}`,
+						matchValues: getLocalMarketplaceMatchValues(
+							item.id,
+							item.name,
+							item.path,
+						),
+						render: (context) => renderSkillCard(item, context),
+					}),
+				)
+			: catalogPrimitive === "plugin"
+				? scopedPlugins.map(
+						(item): MarketplaceLocalInstalledItem => ({
+							key: item.plugin.path,
+							matchValues: getLocalMarketplaceMatchValues(
+								item.plugin.name,
+								item.plugin.path,
+							),
+							render: (context) => renderPluginCard(item, context),
+						}),
+					)
+				: catalogPrimitive === "mcp"
+					? mcp.servers.map(
+							(server): MarketplaceLocalInstalledItem => ({
+								key: server.name,
+								matchValues: getLocalMarketplaceMatchValues(server.name),
+								render: (context) => renderMcpServerCard(server, context),
+							}),
+						)
+					: null;
+	const refreshButton = (
+		<Button
+			variant="outline"
+			size="sm"
+			onClick={() => {
+				void refresh(true);
+				if (activeTab === "Hooks") {
+					void loadHookExecutionStats(true);
+				}
+			}}
+			disabled={isLoading}
+		>
+			<RefreshCw className={cn("h-4 w-4", isLoading && "animate-spin")} />
+		</Button>
+	);
+
+	const content = (
+		<>
+			{chrome === "page" ? (
+				<PageHeader
+					description={sectionDescriptions[activeTab]}
+					title={activeTab}
+					meta={<CommandBadge>{sectionCommands[activeTab]}</CommandBadge>}
+					actions={refreshButton}
+				/>
+			) : (
+				<div className="mb-4 flex items-center justify-between gap-3">
+					<p className="text-sm text-muted-foreground">
+						{sectionDescriptions[activeTab]}
+					</p>
+					{refreshButton}
+				</div>
+			)}
+
+			{showTabs ? (
 				<div className="mb-6 flex items-center gap-0 border-b border-border">
 					{tabs.map((tab) => (
 						<Button
@@ -671,628 +1455,492 @@ export function RulesView() {
 						</Button>
 					))}
 				</div>
+			) : null}
 
-				{errorMessage && (
-					<div className="mb-4 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-						Failed to load configuration lists: {errorMessage}
+			{errorMessage && (
+				<div className="mb-4 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+					Failed to load configuration lists: {errorMessage}
+				</div>
+			)}
+
+			{warnings.length > 0 && (
+				<div className="mb-4 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-700 dark:text-yellow-300">
+					<div className="mb-2 flex items-center gap-2 font-medium">
+						<TriangleAlert className="h-4 w-4" />
+						Partial results
 					</div>
-				)}
+					<ul className="list-disc space-y-1 pl-5">
+						{warnings.map((warning) => (
+							<li key={warning}>{warning}</li>
+						))}
+					</ul>
+				</div>
+			)}
 
-				{warnings.length > 0 && (
-					<div className="mb-4 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-700 dark:text-yellow-300">
-						<div className="mb-2 flex items-center gap-2 font-medium">
-							<TriangleAlert className="h-4 w-4" />
-							Partial results
+			{catalogPrimitive ? (
+				<MarketplaceView
+					chrome="embedded"
+					installedItems={installedCatalogLocalItems ?? undefined}
+					onInstalledItemsChanged={() => refresh(true)}
+					primitive={catalogPrimitive}
+					variant={marketplaceVariant}
+				/>
+			) : null}
+
+			{activeTab === "Rules" && (
+				<div>
+					<div className="grid gap-3">
+						<div className="flex items-center justify-between gap-3">
+							<h3 className="text-base font-semibold text-foreground">
+								Installed
+							</h3>
+							<span className="text-sm text-muted-foreground">
+								{scopedRules.length}
+							</span>
 						</div>
-						<ul className="list-disc space-y-1 pl-5">
-							{warnings.map((warning) => (
-								<li key={warning}>{warning}</li>
+						<div className="flex flex-col gap-2">
+							{scopedRules.map(({ rule, scope }) => (
+								<div
+									key={rule.path}
+									className="grid min-w-0 gap-2 rounded-lg border bg-card p-4"
+								>
+									<div className="flex min-w-0 items-center gap-2">
+										<FileText className="h-4 w-4 shrink-0 text-primary" />
+										<span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+											{rule.name}
+										</span>
+										<ScopeBadge scope={scope} />
+										<Switch
+											checked
+											onCheckedChange={() => {}}
+											disabled
+											title="Toggling rules isn't supported yet"
+											aria-label={`Toggle ${rule.name}`}
+										/>
+										{renderLocalItemMenu(
+											{
+												key: rule.path,
+												type: "rule",
+												id: rule.path,
+												name: rule.name,
+												path: rule.path,
+											},
+											{ showDelete: false },
+										)}
+									</div>
+									<p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+										{previewText(rule.instructions)}
+									</p>
+								</div>
 							))}
-						</ul>
-					</div>
-				)}
-
-				{activeTab === "Rules" && (
-					<div>
-						<p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-							Enabled rules discovered from configured workspace/global
-							directories.
-						</p>
-
-						<div className="mb-6">
-							<h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-								Global Rules
-							</h3>
-							<div className="flex flex-col gap-2">
-								{globalRules.map((rule) => (
-									<div
-										key={rule.path}
-										className="rounded-lg border border-border px-4 py-3"
-									>
-										<div className="flex items-center gap-3">
-											<FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
-											<span className="flex-1 text-sm font-medium text-foreground">
-												{rule.name}
-											</span>
-										</div>
-										<p className="mt-2 text-xs text-muted-foreground">
-											{previewText(rule.instructions)}
-										</p>
-										<p className="mt-1 text-xs font-mono text-muted-foreground">
-											{rule.path}
-										</p>
-									</div>
-								))}
-								{globalRules.length === 0 && (
-									<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-										No global rules found.
-									</p>
-								)}
-							</div>
-						</div>
-
-						<div className="mb-2">
-							<h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-								Project Rules
-							</h3>
-							<div className="flex flex-col gap-2">
-								{projectRules.map((rule) => (
-									<div
-										key={rule.path}
-										className="rounded-lg border border-border px-4 py-3"
-									>
-										<div className="flex items-center gap-3">
-											<FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
-											<span className="flex-1 text-sm font-medium text-foreground">
-												{rule.name}
-											</span>
-										</div>
-										<p className="mt-2 text-xs text-muted-foreground">
-											{previewText(rule.instructions)}
-										</p>
-										<p className="mt-1 text-xs font-mono text-muted-foreground">
-											{rule.path}
-										</p>
-									</div>
-								))}
-								{projectRules.length === 0 && (
-									<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-										No project rules found.
-									</p>
-								)}
-							</div>
+							{scopedRules.length === 0 && (
+								<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+									No rules found.
+								</p>
+							)}
 						</div>
 					</div>
-				)}
+				</div>
+			)}
 
-				{activeTab === "Hooks" && (
-					<div>
-						<p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-							Hook config files discovered from workspace and global hook
-							directories.
+			{activeTab === "Hooks" && (
+				<div>
+					{hookExecutionLoading && hookExecutionSessionId && (
+						<p className="mb-4 text-xs text-muted-foreground">
+							Execution status is based on hook events in session{" "}
+							<span className="font-mono">{hookExecutionSessionId}</span>.
 						</p>
-						{hookExecutionLoading ? (
-							<p className="mb-4 text-xs text-muted-foreground">
-								Loading hook execution status...
-							</p>
-						) : null}
-						{hookExecutionSessionId ? (
-							<p className="mb-4 text-xs text-muted-foreground">
-								Execution status is based on hook events in session{" "}
-								<span className="font-mono">{hookExecutionSessionId}</span>.
-							</p>
-						) : (
-							<p className="mb-4 text-xs text-muted-foreground">
-								Execution status unavailable (no sessions with hook events
-								found).
+					)}
+
+					<div className="grid gap-3">
+						<div className="flex items-center justify-between gap-3">
+							<h3 className="text-base font-semibold text-foreground">
+								Installed
+							</h3>
+							<span className="text-sm text-muted-foreground">
+								{scopedHooks.length}
+							</span>
+						</div>
+						<div className="flex flex-col gap-2">
+							{scopedHooks.map(({ hook, scope }) => (
+								<div
+									key={hook.path}
+									className="grid min-w-0 gap-2 rounded-lg border bg-card p-4"
+								>
+									<div className="flex min-w-0 items-center gap-2">
+										<Code className="h-4 w-4 shrink-0 text-primary" />
+										<span className="min-w-0 truncate text-sm font-semibold text-foreground">
+											{hook.fileName}
+										</span>
+										<ScopeBadge scope={scope} />
+										{hook.hookEventName && (
+											<>
+												<Badge
+													variant="outline"
+													className="shrink-0 text-muted-foreground"
+												>
+													{hook.hookEventName}
+												</Badge>
+												{(() => {
+													const stats =
+														hookExecutionByEvent[hook.hookEventName];
+													const executed = (stats?.count ?? 0) > 0;
+													return (
+														<Badge
+															variant="outline"
+															className={cn(
+																"shrink-0",
+																executed
+																	? "border-emerald-400/50 text-emerald-600 dark:text-emerald-400"
+																	: "text-muted-foreground",
+															)}
+														>
+															{executed
+																? `${stats?.count ?? 0} executed`
+																: "never executed"}
+														</Badge>
+													);
+												})()}
+											</>
+										)}
+									</div>
+									{hook.hookEventName ? (
+										<p className="text-xs leading-5 text-muted-foreground">
+											Last run:{" "}
+											{formatExecutionTs(
+												hookExecutionByEvent[hook.hookEventName]?.lastTs ??
+													null,
+											)}
+										</p>
+									) : null}
+									<p className="truncate text-xs font-mono text-muted-foreground">
+										{hook.path}
+									</p>
+								</div>
+							))}
+							{scopedHooks.length === 0 && (
+								<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+									No hooks found.
+								</p>
+							)}
+						</div>
+					</div>
+				</div>
+			)}
+
+			{activeTab === "Skills" && !catalogPrimitive && (
+				<div>
+					<p className="mb-6 text-sm leading-relaxed text-muted-foreground">
+						Skills can be invoked in chat with{" "}
+						<code className="rounded bg-secondary px-1.5 py-0.5 text-xs font-mono text-foreground">
+							/SKILL
+						</code>
+						.
+					</p>
+
+					<div className="flex flex-col gap-3">
+						{commandItems.map((item) => (
+							<div
+								key={`${item.type}:${item.path}`}
+								className="rounded-lg border border-border px-5 py-4"
+							>
+								<div className="flex items-center gap-3">
+									{item.type === "workflow" ? (
+										<Play className="h-4 w-4 shrink-0 text-primary" />
+									) : (
+										<Zap className="h-4 w-4 shrink-0 text-primary" />
+									)}
+									<h3 className="text-sm font-semibold text-foreground">
+										{item.name}
+									</h3>
+									<span className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground">
+										{item.type}
+									</span>
+								</div>
+								<p className="mt-2 ml-7 text-xs text-muted-foreground">
+									{item.description?.trim() || previewText(item.instructions)}
+								</p>
+								<p className="mt-1 ml-7 text-xs font-mono text-muted-foreground">
+									{item.path}
+								</p>
+							</div>
+						))}
+						{commandItems.length === 0 && (
+							<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+								No enabled skills or workflows found.
 							</p>
 						)}
-
-						<div className="mb-6">
-							<h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-								Global Hooks
-							</h3>
-							<div className="flex flex-col gap-2">
-								{globalHooks.map((hook) => (
-									<div
-										key={hook.path}
-										className="rounded-lg border border-border px-4 py-3"
-									>
-										<div className="flex items-center gap-3">
-											<Code className="h-4 w-4 shrink-0 text-muted-foreground" />
-											<span className="flex-1 text-sm font-mono text-foreground">
-												{hook.fileName}
-											</span>
-											{hook.hookEventName && (
-												<div className="flex items-center gap-2">
-													<span className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground">
-														{hook.hookEventName}
-													</span>
-													{(() => {
-														const stats =
-															hookExecutionByEvent[hook.hookEventName];
-														const executed = (stats?.count ?? 0) > 0;
-														return (
-															<span
-																className={cn(
-																	"rounded border px-2 py-0.5 text-xs",
-																	executed
-																		? "border-emerald-400/50 text-emerald-600 dark:text-emerald-400"
-																		: "border-border text-muted-foreground",
-																)}
-															>
-																{executed
-																	? `${stats?.count ?? 0} executed`
-																	: "never executed"}
-															</span>
-														);
-													})()}
-												</div>
-											)}
-										</div>
-										{hook.hookEventName ? (
-											<p className="mt-1 text-xs text-muted-foreground">
-												Last run:{" "}
-												{formatExecutionTs(
-													hookExecutionByEvent[hook.hookEventName]?.lastTs ??
-														null,
-												)}
-											</p>
-										) : null}
-										<p className="mt-1 text-xs font-mono text-muted-foreground">
-											{hook.path}
-										</p>
-									</div>
-								))}
-								{globalHooks.length === 0 && (
-									<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-										No global hooks found.
-									</p>
-								)}
-							</div>
-						</div>
-
-						<div>
-							<div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-								<FolderOpen className="h-3.5 w-3.5" />
-								Project Hooks
-							</div>
-							<div className="flex flex-col gap-2">
-								{projectHooks.map((hook) => (
-									<div
-										key={hook.path}
-										className="rounded-lg border border-border px-4 py-3"
-									>
-										<div className="flex items-center gap-3">
-											<Code className="h-4 w-4 shrink-0 text-muted-foreground" />
-											<span className="flex-1 text-sm font-mono text-foreground">
-												{hook.fileName}
-											</span>
-											{hook.hookEventName && (
-												<div className="flex items-center gap-2">
-													<span className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground">
-														{hook.hookEventName}
-													</span>
-													{(() => {
-														const stats =
-															hookExecutionByEvent[hook.hookEventName];
-														const executed = (stats?.count ?? 0) > 0;
-														return (
-															<span
-																className={cn(
-																	"rounded border px-2 py-0.5 text-xs",
-																	executed
-																		? "border-emerald-400/50 text-emerald-600 dark:text-emerald-400"
-																		: "border-border text-muted-foreground",
-																)}
-															>
-																{executed
-																	? `${stats?.count ?? 0} executed`
-																	: "never executed"}
-															</span>
-														);
-													})()}
-												</div>
-											)}
-										</div>
-										{hook.hookEventName ? (
-											<p className="mt-1 text-xs text-muted-foreground">
-												Last run:{" "}
-												{formatExecutionTs(
-													hookExecutionByEvent[hook.hookEventName]?.lastTs ??
-														null,
-												)}
-											</p>
-										) : null}
-										<p className="mt-1 text-xs font-mono text-muted-foreground">
-											{hook.path}
-										</p>
-									</div>
-								))}
-								{projectHooks.length === 0 && (
-									<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-										No project hooks found.
-									</p>
-								)}
-							</div>
-						</div>
 					</div>
-				)}
+				</div>
+			)}
 
-				{activeTab === "Skills" && (
-					<div>
-						<p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-							Enabled skills and workflows. Workflows can be invoked in chat
-							with{" "}
-							<code className="rounded bg-secondary px-1.5 py-0.5 text-xs font-mono text-foreground">
-								/workflow-name
-							</code>
-							.
-						</p>
+			{activeTab === "Agents" && (
+				<div>
+					<p className="mb-6 text-sm leading-relaxed text-muted-foreground">
+						Configured agents discovered from Documents and settings
+						directories.
+					</p>
 
-						<div className="flex flex-col gap-3">
-							{commandItems.map((item) => (
-								<div
-									key={`${item.type}:${item.path}`}
-									className="rounded-lg border border-border px-5 py-4"
-								>
-									<div className="flex items-center gap-3">
-										{item.type === "workflow" ? (
-											<Play className="h-4 w-4 shrink-0 text-primary" />
-										) : (
-											<Zap className="h-4 w-4 shrink-0 text-primary" />
-										)}
-										<h3 className="text-sm font-semibold text-foreground">
-											{item.name}
-										</h3>
-										<span className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground">
-											{item.type}
-										</span>
-									</div>
-									<p className="mt-2 ml-7 text-xs text-muted-foreground">
-										{item.description?.trim() || previewText(item.instructions)}
-									</p>
-									<p className="mt-1 ml-7 text-xs font-mono text-muted-foreground">
-										{item.path}
-									</p>
+					<div className="flex flex-col gap-3">
+						{agents.map((agent) => (
+							<div
+								key={agent.path}
+								className="rounded-lg border border-border px-5 py-4"
+							>
+								<div className="flex items-center gap-3">
+									<Bot className="h-4 w-4 shrink-0 text-primary" />
+									<h3 className="text-sm font-semibold text-foreground">
+										{agent.name}
+									</h3>
 								</div>
-							))}
-							{commandItems.length === 0 && (
+								<p className="mt-1 ml-7 text-xs font-mono text-muted-foreground">
+									{agent.path}
+								</p>
+							</div>
+						))}
+						{agents.length === 0 && (
+							<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+								No configured agents found.
+							</p>
+						)}
+					</div>
+				</div>
+			)}
+
+			{activeTab === "Plugins" && !catalogPrimitive && (
+				<div>
+					<p className="mb-6 text-sm leading-relaxed text-muted-foreground">
+						Cline and portable Agent Plugins discovered by the shared Hub.
+						Changes apply when a session is rebuilt or started.
+					</p>
+
+					<div className="mb-6">
+						<h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+							Cline Plugins ({clinePlugins.length})
+						</h3>
+						<div className="flex flex-col gap-3">
+							{clinePlugins.map((plugin) => renderPluginCard(plugin))}
+							{clinePlugins.length === 0 && (
 								<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-									No enabled skills or workflows found.
+									No Cline Plugins found.
 								</p>
 							)}
 						</div>
 					</div>
-				)}
 
-				{activeTab === "Agents" && (
 					<div>
-						<p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-							Configured agents discovered from Documents and settings
-							directories.
-						</p>
-
+						<h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+							Agent Plugins ({agentPlugins.length})
+						</h3>
 						<div className="flex flex-col gap-3">
-							{agents.map((agent) => (
-								<div
-									key={agent.path}
-									className="rounded-lg border border-border px-5 py-4"
-								>
-									<div className="flex items-center gap-3">
-										<Bot className="h-4 w-4 shrink-0 text-primary" />
-										<h3 className="text-sm font-semibold text-foreground">
-											{agent.name}
-										</h3>
-									</div>
-									<p className="mt-1 ml-7 text-xs font-mono text-muted-foreground">
-										{agent.path}
-									</p>
-								</div>
-							))}
-							{agents.length === 0 && (
+							{agentPlugins.map((plugin) => renderPluginCard(plugin))}
+							{agentPlugins.length === 0 && (
 								<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-									No configured agents found.
+									No Agent Plugins found.
 								</p>
 							)}
 						</div>
 					</div>
-				)}
+				</div>
+			)}
 
-				{activeTab === "Plugins" && (
-					<div>
-						<p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-							Plugins discovered from workspace and global plugin directories.
-						</p>
-
-						<div className="mb-6">
-							<h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-								Global Plugins
-							</h3>
-							<div className="flex flex-col gap-3">
-								{globalPlugins.map((plugin) => (
-									<div
-										key={plugin.path}
-										className="rounded-lg border border-border px-5 py-4"
-									>
-										<div className="flex items-center gap-3">
-											<Puzzle className="h-4 w-4 shrink-0 text-primary" />
-											<h3 className="min-w-0 flex-1 text-sm font-semibold text-foreground">
-												{plugin.name}
-											</h3>
-											<span className="text-xs text-muted-foreground">
-												{plugin.enabled ? "Enabled" : "Disabled"}
-											</span>
-											<Switch
-												checked={plugin.enabled}
-												onCheckedChange={() => {
-													void setPluginEnabled(plugin);
-												}}
-												disabled={togglingPluginPaths.has(plugin.path)}
-												aria-label={`Toggle ${plugin.name}`}
-											/>
-										</div>
-										<p className="mt-1 ml-7 text-xs font-mono text-muted-foreground">
-											{plugin.path}
-										</p>
-										<div className="mt-3 ml-7 flex flex-col gap-2">
-											{(
-												pluginToolsByPluginKey.get(
-													`${plugin.name}:${plugin.path}`,
-												) ?? []
-											).map((tool) => {
-												const isToggling = togglingToolIds.has(tool.id);
-												return (
-													<div
-														key={tool.id}
-														className="flex items-center justify-between gap-4 rounded-md border border-border/70 px-3 py-2"
-													>
-														<div className="min-w-0">
-															<p className="text-xs font-medium text-foreground">
-																{tool.name}
-															</p>
-															<p className="text-xs text-muted-foreground">
-																{tool.description?.trim() ||
-																	"No description available."}
-															</p>
-														</div>
-														<div className="flex items-center gap-2">
-															<span className="text-xs text-muted-foreground">
-																{tool.enabled ? "Enabled" : "Disabled"}
-															</span>
-															<Switch
-																checked={tool.enabled}
-																onCheckedChange={() => {
-																	void setToolEnabled(tool);
-																}}
-																disabled={isToggling || !plugin.enabled}
-																aria-label={`Toggle ${tool.name}`}
-															/>
-														</div>
-													</div>
-												);
-											})}
-											{(pluginToolsByPluginKey.get(
-												`${plugin.name}:${plugin.path}`,
-											)?.length ?? 0) === 0 && (
-												<p className="text-xs text-muted-foreground">
-													No plugin tools found.
-												</p>
-											)}
-										</div>
-									</div>
-								))}
-								{globalPlugins.length === 0 && (
-									<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-										No global plugins found.
-									</p>
-								)}
-							</div>
-						</div>
-
-						<div>
-							<h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-								Project Plugins
-							</h3>
-							<div className="flex flex-col gap-3">
-								{projectPlugins.map((plugin) => (
-									<div
-										key={plugin.path}
-										className="rounded-lg border border-border px-5 py-4"
-									>
-										<div className="flex items-center gap-3">
-											<Puzzle className="h-4 w-4 shrink-0 text-primary" />
-											<h3 className="min-w-0 flex-1 text-sm font-semibold text-foreground">
-												{plugin.name}
-											</h3>
-											<span className="text-xs text-muted-foreground">
-												{plugin.enabled ? "Enabled" : "Disabled"}
-											</span>
-											<Switch
-												checked={plugin.enabled}
-												onCheckedChange={() => {
-													void setPluginEnabled(plugin);
-												}}
-												disabled={togglingPluginPaths.has(plugin.path)}
-												aria-label={`Toggle ${plugin.name}`}
-											/>
-										</div>
-										<p className="mt-1 ml-7 text-xs font-mono text-muted-foreground">
-											{plugin.path}
-										</p>
-										<div className="mt-3 ml-7 flex flex-col gap-2">
-											{(
-												pluginToolsByPluginKey.get(
-													`${plugin.name}:${plugin.path}`,
-												) ?? []
-											).map((tool) => {
-												const isToggling = togglingToolIds.has(tool.id);
-												return (
-													<div
-														key={tool.id}
-														className="flex items-center justify-between gap-4 rounded-md border border-border/70 px-3 py-2"
-													>
-														<div className="min-w-0">
-															<p className="text-xs font-medium text-foreground">
-																{tool.name}
-															</p>
-															<p className="text-xs text-muted-foreground">
-																{tool.description?.trim() ||
-																	"No description available."}
-															</p>
-														</div>
-														<div className="flex items-center gap-2">
-															<span className="text-xs text-muted-foreground">
-																{tool.enabled ? "Enabled" : "Disabled"}
-															</span>
-															<Switch
-																checked={tool.enabled}
-																onCheckedChange={() => {
-																	void setToolEnabled(tool);
-																}}
-																disabled={isToggling || !plugin.enabled}
-																aria-label={`Toggle ${tool.name}`}
-															/>
-														</div>
-													</div>
-												);
-											})}
-											{(pluginToolsByPluginKey.get(
-												`${plugin.name}:${plugin.path}`,
-											)?.length ?? 0) === 0 && (
-												<p className="text-xs text-muted-foreground">
-													No plugin tools found.
-												</p>
-											)}
-										</div>
-									</div>
-								))}
-								{projectPlugins.length === 0 && (
-									<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-										No project plugins found.
-									</p>
-								)}
-							</div>
-						</div>
+			{activeTab === "Tools" && (
+				<div>
+					<div className="relative mb-6 block">
+						<Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+						<Input
+							aria-label="Search tools"
+							className="h-10 pl-8"
+							onChange={(event) => setToolsSearchQuery(event.target.value)}
+							placeholder="Search tools"
+							value={toolsSearchQuery}
+						/>
 					</div>
-				)}
 
-				{activeTab === "Tools" && (
-					<div>
-						<p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-							Builtin tool groups and plugin-contributed tools available to the
-							runtime.
-						</p>
-
-						<div className="mb-6">
-							<h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-								Builtin Tools
+					<div className="mb-6 grid gap-3">
+						<div className="flex items-center justify-between gap-3">
+							<h3 className="text-base font-semibold text-foreground">
+								BuiltIn Tools{" "}
+								<span className="text-muted-foreground">
+									{filteredBuiltinTools.length}
+								</span>
 							</h3>
-							<div className="flex flex-col gap-3">
-								{builtinTools.map((tool) =>
-									(() => {
-										const isToggling = togglingToolIds.has(tool.id);
-										return (
-											<div
-												key={tool.id}
-												className="rounded-lg border border-border px-5 py-4"
-											>
-												<div className="flex items-center gap-3">
-													<Wrench className="h-4 w-4 shrink-0 text-primary" />
-													<h3 className="min-w-0 flex-1 text-sm font-semibold text-foreground">
-														{tool.name}
-													</h3>
-													<span className="text-xs text-muted-foreground">
-														{tool.enabled ? "Enabled" : "Disabled"}
-													</span>
-													<Switch
-														checked={tool.enabled}
-														onCheckedChange={() => {
-															void setToolEnabled(tool);
-														}}
-														disabled={isToggling}
-														aria-label={`Toggle ${tool.name}`}
-													/>
-												</div>
-												<p className="mt-2 ml-7 text-xs text-muted-foreground">
-													{tool.description?.trim() ||
-														"No description available."}
-												</p>
-												{!!tool.headlessToolNames?.length && (
-													<p className="mt-1 ml-7 text-xs font-mono text-muted-foreground">
+							<div className="flex items-center gap-2 text-sm text-muted-foreground">
+								<Checkbox
+									checked={allBuiltinToolsEnabled}
+									onCheckedChange={() => {
+										void setAllToolsEnabled(
+											filteredBuiltinTools,
+											!allBuiltinToolsEnabled,
+										);
+									}}
+									disabled={
+										filteredBuiltinTools.length === 0 ||
+										filteredBuiltinTools.some((tool) =>
+											togglingToolIds.has(tool.id),
+										)
+									}
+									id="builtin-tools-toggle-all"
+									aria-label={
+										allBuiltinToolsEnabled
+											? "Disable all builtin tools"
+											: "Enable all builtin tools"
+									}
+								/>
+								<label
+									className="cursor-pointer"
+									htmlFor="builtin-tools-toggle-all"
+								>
+									{allBuiltinToolsEnabled ? "Disable all" : "Enable all"}
+								</label>
+							</div>
+						</div>
+						<div className="flex flex-col gap-2">
+							{filteredBuiltinTools.map((tool) =>
+								(() => {
+									const isToggling = togglingToolIds.has(tool.id);
+									return (
+										<div
+											key={tool.id}
+											className="grid min-w-0 gap-2 rounded-lg border bg-card p-4"
+										>
+											<div className="flex min-w-0 items-center gap-2">
+												<Wrench className="h-4 w-4 shrink-0 text-primary" />
+												<h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+													{tool.name}
+												</h3>
+												<Switch
+													checked={tool.enabled}
+													onCheckedChange={() => {
+														void setToolEnabled(tool);
+													}}
+													disabled={isToggling}
+													aria-label={`Toggle ${tool.name}`}
+												/>
+											</div>
+											<p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+												{tool.description?.trim() ||
+													"No description available."}
+											</p>
+											{!!tool.headlessToolNames?.length &&
+												tool.headlessToolNames?.length > 1 && (
+													<p className="truncate text-xs font-mono text-muted-foreground">
 														{tool.headlessToolNames.join(", ")}
 													</p>
 												)}
-											</div>
-										);
-									})(),
-								)}
-								{builtinTools.length === 0 && (
-									<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-										No builtin tools found.
-									</p>
-								)}
-							</div>
-						</div>
-
-						<div>
-							<h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-								Plugin Tools
-							</h3>
-							<div className="flex flex-col gap-3">
-								{pluginTools.map((tool) =>
-									(() => {
-										const isToggling = togglingToolIds.has(tool.id);
-										return (
-											<div
-												key={tool.id}
-												className="rounded-lg border border-border px-5 py-4"
-											>
-												<div className="flex items-center gap-3">
-													<Wrench className="h-4 w-4 shrink-0 text-primary" />
-													<h3 className="min-w-0 flex-1 text-sm font-semibold text-foreground">
-														{tool.name}
-													</h3>
-													{tool.pluginName && (
-														<span className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground">
-															plugin: {tool.pluginName}
-														</span>
-													)}
-													<span className="text-xs text-muted-foreground">
-														{tool.enabled ? "Enabled" : "Disabled"}
-													</span>
-													<Switch
-														checked={tool.enabled}
-														onCheckedChange={() => {
-															void setToolEnabled(tool);
-														}}
-														disabled={isToggling}
-														aria-label={`Toggle ${tool.name}`}
-													/>
-												</div>
-												<p className="mt-2 ml-7 text-xs text-muted-foreground">
-													{tool.description?.trim() ||
-														"No description available."}
-												</p>
-												{tool.path && (
-													<p className="mt-1 ml-7 text-xs font-mono text-muted-foreground">
-														{tool.path}
-													</p>
-												)}
-											</div>
-										);
-									})(),
-								)}
-								{pluginTools.length === 0 && (
-									<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-										No plugin tools found.
-									</p>
-								)}
-							</div>
+										</div>
+									);
+								})(),
+							)}
+							{filteredBuiltinTools.length === 0 && (
+								<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+									{builtinTools.length === 0
+										? "No builtin tools found."
+										: "No tools match your search."}
+								</p>
+							)}
 						</div>
 					</div>
-				)}
-			</div>
-		</ScrollArea>
+
+					<div className="grid gap-3">
+						<div className="flex items-center justify-between gap-3">
+							<h3 className="text-base font-semibold text-foreground">
+								Plugin Tools{" "}
+								<span className="text-muted-foreground">
+									{filteredPluginTools.length}
+								</span>
+							</h3>
+							<div className="flex items-center gap-2 text-sm text-muted-foreground">
+								<Checkbox
+									checked={allPluginToolsEnabled}
+									onCheckedChange={() => {
+										void setAllToolsEnabled(
+											filteredPluginTools,
+											!allPluginToolsEnabled,
+										);
+									}}
+									disabled={
+										filteredPluginTools.length === 0 ||
+										filteredPluginTools.some((tool) =>
+											togglingToolIds.has(tool.id),
+										)
+									}
+									id="plugin-tools-toggle-all"
+									aria-label={
+										allPluginToolsEnabled
+											? "Disable all plugin tools"
+											: "Enable all plugin tools"
+									}
+								/>
+								<label
+									className="cursor-pointer"
+									htmlFor="plugin-tools-toggle-all"
+								>
+									{allPluginToolsEnabled ? "Disable all" : "Enable all"}
+								</label>
+							</div>
+						</div>
+						<div className="flex flex-col gap-2">
+							{filteredPluginTools.map((tool) =>
+								(() => {
+									const isToggling = togglingToolIds.has(tool.id);
+									return (
+										<div
+											key={tool.id}
+											className="grid min-w-0 gap-2 rounded-lg border bg-card p-4"
+										>
+											<div className="flex min-w-0 items-center gap-2">
+												<Wrench className="h-4 w-4 shrink-0 text-primary" />
+												<h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+													{tool.name}
+												</h3>
+												{tool.pluginName && (
+													<Badge
+														variant="muted"
+														className="shrink-0"
+														title={tool.path || tool.pluginName}
+													>
+														{tool.pluginName}
+													</Badge>
+												)}
+												<Switch
+													checked={tool.enabled}
+													onCheckedChange={() => {
+														void setToolEnabled(tool);
+													}}
+													disabled={isToggling}
+													aria-label={`Toggle ${tool.name}`}
+												/>
+											</div>
+											<p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+												{tool.description?.trim() ||
+													"No description available."}
+											</p>
+										</div>
+									);
+								})(),
+							)}
+							{filteredPluginTools.length === 0 && (
+								<p className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+									{pluginTools.length === 0
+										? "No plugin tools found."
+										: "No tools match your search."}
+								</p>
+							)}
+						</div>
+					</div>
+				</div>
+			)}
+		</>
 	);
+
+	return chrome === "embedded" ? (
+		<div>{content}</div>
+	) : (
+		<PageFrame>{content}</PageFrame>
+	);
+}
+
+export function RulesView() {
+	return <CustomizationSectionView showTabs />;
 }

@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+	chmod,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UserInstructionConfigService } from "@cline/core";
@@ -10,6 +17,7 @@ import {
 import {
 	applyPluginFailures,
 	type InteractiveConfigItem,
+	isToggleableInteractiveConfigItem,
 } from "../../tui/interactive-config";
 import type { Config } from "../../utils/types";
 import { createInteractiveConfigDataLoader } from "./config-data";
@@ -43,9 +51,17 @@ describe("interactive config data loader", () => {
 	};
 
 	afterEach(async () => {
-		process.env.CLINE_GLOBAL_SETTINGS_PATH =
-			envSnapshot.CLINE_GLOBAL_SETTINGS_PATH;
-		process.env.CLINE_MCP_SETTINGS_PATH = envSnapshot.CLINE_MCP_SETTINGS_PATH;
+		if (envSnapshot.CLINE_GLOBAL_SETTINGS_PATH === undefined) {
+			delete process.env.CLINE_GLOBAL_SETTINGS_PATH;
+		} else {
+			process.env.CLINE_GLOBAL_SETTINGS_PATH =
+				envSnapshot.CLINE_GLOBAL_SETTINGS_PATH;
+		}
+		if (envSnapshot.CLINE_MCP_SETTINGS_PATH === undefined) {
+			delete process.env.CLINE_MCP_SETTINGS_PATH;
+		} else {
+			process.env.CLINE_MCP_SETTINGS_PATH = envSnapshot.CLINE_MCP_SETTINGS_PATH;
+		}
 		await Promise.all(
 			tempRoots.map((dir) => rm(dir, { recursive: true, force: true })),
 		);
@@ -75,6 +91,194 @@ describe("interactive config data loader", () => {
 		);
 		return pluginPath;
 	}
+
+	async function writeMcpSettingsPlugin(tempRoot: string): Promise<string> {
+		const pluginsDir = join(tempRoot, ".cline", "plugins");
+		await mkdir(pluginsDir, { recursive: true });
+		const pluginPath = join(pluginsDir, "settings-mcp-plugin.js");
+		await writeFile(
+			pluginPath,
+			[
+				"export default {",
+				"  name: 'settings-mcp-plugin',",
+				"  manifest: { capabilities: ['mcp'] },",
+				"  setup(api) {",
+				"    api.registerMcpServer({",
+				"      name: 'smoke',",
+				"      transport: { type: 'stdio', command: process.execPath, args: ['-e', 'process.exit(0)'] },",
+				"    });",
+				"  },",
+				"};",
+			].join("\n"),
+		);
+		return pluginPath;
+	}
+
+	it("merges the hub-owned Agent Plugin inventory into the config view", async () => {
+		const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-agent-plugin-"));
+		tempRoots.push(tempRoot);
+		const pluginRoot = "/remote/home/.agents/plugins/portable-review";
+		const calls: unknown[] = [];
+		const loader = createInteractiveConfigDataLoader({
+			config: createConfig(tempRoot),
+			loadCoreSettings: async (input) => {
+				calls.push(input);
+				return {
+					workflows: [],
+					rules: [],
+					tools: [],
+					plugins: [
+						{
+							id: "agent-plugin:portable-review",
+							name: "portable-review",
+							path: pluginRoot,
+							kind: "plugin",
+							source: "global-plugin",
+							enabled: true,
+							toggleable: true,
+							agentPlugin: true,
+						},
+					],
+					skills: [
+						{
+							id: "portable-review:review",
+							name: "review",
+							path: `${pluginRoot}/skills/review/SKILL.md`,
+							kind: "skill",
+							source: "global-plugin",
+							enabled: true,
+							toggleable: false,
+							agentPlugin: true,
+							pluginName: "portable-review",
+							pluginPath: pluginRoot,
+						},
+					],
+					mcp: [
+						{
+							id: "portable-review.docs",
+							name: "portable-review.docs",
+							path: `${pluginRoot}/mcp.json`,
+							kind: "mcp",
+							source: "global-plugin",
+							enabled: true,
+							toggleable: false,
+							agentPlugin: true,
+							pluginName: "portable-review",
+							pluginPath: pluginRoot,
+						},
+					],
+				};
+			},
+		});
+
+		const data = await loader.loadConfigData({ includePluginTools: false });
+
+		expect(calls).toEqual([
+			expect.objectContaining({
+				includePluginTools: false,
+			}),
+		]);
+		expect(data.plugins).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					name: "portable-review",
+					agentPlugin: true,
+					toggleable: true,
+					deletable: false,
+				}),
+			]),
+		);
+		const skill = data.skills.find(
+			(item) => item.id === "portable-review:review",
+		);
+		expect(skill).toMatchObject({
+			pluginName: "portable-review",
+			agentPlugin: true,
+		});
+		expect(skill && isToggleableInteractiveConfigItem(skill)).toBe(false);
+		expect(data.mcp).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ id: "portable-review.docs" }),
+			]),
+		);
+	});
+
+	it("toggles Agent Plugins through the hub without mutating client settings", async () => {
+		const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-agent-toggle-"));
+		tempRoots.push(tempRoot);
+		const globalSettingsPath = join(tempRoot, "global-settings.json");
+		process.env.CLINE_GLOBAL_SETTINGS_PATH = globalSettingsPath;
+		const pluginRoot = "/hub/home/.agents/plugins/portable-review";
+		const toggleCalls: unknown[] = [];
+		const loader = createInteractiveConfigDataLoader({
+			config: {
+				...createConfig(tempRoot),
+				agentPluginPaths: ["./portable-review"],
+			},
+			toggleCoreSettings: async (input) => {
+				toggleCalls.push(input);
+				return {
+					changedTypes: ["plugins", "skills", "mcp"],
+					snapshot: {
+						workflows: [],
+						rules: [],
+						tools: [],
+						skills: [],
+						mcp: [],
+						plugins: [
+							{
+								id: "agent-plugin:portable-review",
+								name: "portable-review",
+								path: pluginRoot,
+								kind: "plugin",
+								source: "global-plugin",
+								enabled: false,
+								toggleable: true,
+								agentPlugin: true,
+							},
+						],
+					},
+				};
+			},
+		});
+
+		const data = await loader.onToggleConfigItem(
+			{
+				id: "agent-plugin:portable-review",
+				name: "portable-review",
+				path: pluginRoot,
+				kind: "plugin",
+				source: "global-plugin",
+				enabled: true,
+				toggleable: true,
+				deletable: false,
+				agentPlugin: true,
+			},
+			{ includePluginTools: false },
+		);
+
+		expect(toggleCalls).toEqual([
+			expect.objectContaining({
+				type: "plugins",
+				id: "agent-plugin:portable-review",
+				path: pluginRoot,
+				name: "portable-review",
+				enabled: false,
+				agentPluginPaths: ["./portable-review"],
+				includePluginTools: false,
+			}),
+		]);
+		expect(data?.plugins).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					name: "portable-review",
+					enabled: false,
+					agentPlugin: true,
+				}),
+			]),
+		);
+		await expect(readFile(globalSettingsPath, "utf8")).rejects.toThrow();
+	});
 
 	it("toggles a skill item to the opposite enabled state and refreshes before reload", async () => {
 		const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-data-"));
@@ -311,6 +515,70 @@ Find installable skills.`,
 		).toBe(true);
 	});
 
+	it("loads plugin-owned MCP servers from settings", async () => {
+		const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-data-"));
+		tempRoots.push(tempRoot);
+		const settingsPath = join(tempRoot, "cline_mcp_settings.json");
+		process.env.CLINE_MCP_SETTINGS_PATH = settingsPath;
+		const pluginPath = await writeMcpSettingsPlugin(tempRoot);
+		await writeFile(
+			settingsPath,
+			`${JSON.stringify(
+				{
+					mcpServers: {
+						smoke: {
+							transport: {
+								type: "stdio",
+								command: process.execPath,
+								args: ["-e", "process.exit(0)"],
+							},
+							metadata: {
+								source: "plugin",
+								pluginName: "settings-mcp-plugin",
+								pluginPath,
+							},
+						},
+					},
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		const loader = createInteractiveConfigDataLoader({
+			config: createConfig(tempRoot),
+		});
+
+		const data = await loader.loadConfigData({ includePluginTools: true });
+
+		expect(
+			data.mcp.some(
+				(item) =>
+					item.name === "smoke" &&
+					item.pluginName === "settings-mcp-plugin" &&
+					item.pluginPath === pluginPath &&
+					item.kind === "mcp",
+			),
+		).toBe(true);
+	});
+
+	it("does not load plugin MCP rows directly from plugin diagnostics", async () => {
+		const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-data-"));
+		tempRoots.push(tempRoot);
+		process.env.CLINE_GLOBAL_SETTINGS_PATH = join(
+			tempRoot,
+			"global-settings.json",
+		);
+		const pluginPath = await writeMcpSettingsPlugin(tempRoot);
+		const loader = createInteractiveConfigDataLoader({
+			config: createConfig(tempRoot),
+		});
+
+		const data = await loader.loadConfigData({ includePluginTools: true });
+
+		expect(data.plugins.some((item) => item.path === pluginPath)).toBe(true);
+		expect(data.mcp.some((item) => item.pluginPath === pluginPath)).toBe(false);
+	});
+
 	it("keeps failed plugins visible with their load error", async () => {
 		const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-data-"));
 		tempRoots.push(tempRoot);
@@ -453,6 +721,112 @@ Find installable skills.`,
 		expect(
 			refreshedData.plugins.find((item) => item.path === pluginPath)?.enabled,
 		).toBe(true);
+	});
+
+	it("deletes a package-backed plugin and refreshes bundled slash commands", async () => {
+		const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-data-"));
+		tempRoots.push(tempRoot);
+		process.env.CLINE_GLOBAL_SETTINGS_PATH = join(
+			tempRoot,
+			"global-settings.json",
+		);
+		const packageDir = join(tempRoot, ".cline", "plugins", "delete-plugin");
+		const pluginPath = join(packageDir, "index.ts");
+		const skillPath = join(packageDir, "skills", "erase", "SKILL.md");
+		await mkdir(join(packageDir, "skills", "erase"), { recursive: true });
+		await writeFile(
+			join(packageDir, "package.json"),
+			JSON.stringify(
+				{
+					name: "delete-plugin",
+					cline: {
+						plugins: [{ paths: ["./index.ts"] }],
+					},
+				},
+				null,
+				2,
+			),
+		);
+		await writeFile(pluginPath, "export default {};\n");
+		await writeFile(
+			skillPath,
+			`---
+name: erase
+---
+Erase stale plugin commands.`,
+		);
+		await writeFile(
+			process.env.CLINE_GLOBAL_SETTINGS_PATH,
+			JSON.stringify({ disabledPlugins: [pluginPath] }, null, 2),
+		);
+		const refreshCalls: string[] = [];
+		let refreshed = false;
+		const userInstructionService = {
+			async refreshType(type: string) {
+				refreshCalls.push(type);
+				refreshed = true;
+			},
+			listRuntimeCommands() {
+				return refreshed
+					? []
+					: [
+							{
+								name: "erase",
+								instructions: "Erase stale plugin commands.",
+								description: "Erase",
+								kind: "skill",
+							},
+						];
+			},
+			listRecords(type: string) {
+				if (type !== "skill") {
+					return [];
+				}
+				return [
+					{
+						id: "erase",
+						type: "skill",
+						filePath: skillPath,
+						item: {
+							name: "erase",
+							disabled: false,
+							description: "Erase",
+							instructions: "Erase stale plugin commands.",
+							frontmatter: {},
+						},
+					},
+				];
+			},
+		} as unknown as UserInstructionConfigService;
+		const loader = createInteractiveConfigDataLoader({
+			config: createConfig(tempRoot),
+			userInstructionService,
+		});
+		const data = await loader.loadConfigData({ includePluginTools: false });
+		const plugin = data.plugins.find((item) => item.path === pluginPath);
+		if (!plugin) {
+			throw new Error("Expected package plugin to be listed");
+		}
+
+		const nextData = await loader.onDeleteConfigItem(plugin, {
+			includePluginTools: false,
+		});
+		const settings = JSON.parse(
+			await readFile(process.env.CLINE_GLOBAL_SETTINGS_PATH, "utf8"),
+		) as { disabledPlugins?: string[] };
+
+		await expect(readFile(pluginPath, "utf8")).rejects.toThrow();
+		await expect(readFile(skillPath, "utf8")).rejects.toThrow();
+		expect(settings.disabledPlugins).toBeUndefined();
+		expect(refreshCalls).toEqual(
+			expect.arrayContaining(["workflow", "rule", "skill"]),
+		);
+		expect(nextData?.plugins.some((item) => item.path === pluginPath)).toBe(
+			false,
+		);
+		expect(
+			nextData?.workflowSlashCommands.map((command) => command.name),
+		).not.toContain("erase");
 	});
 
 	it("uses the package name for package-backed plugin entries", async () => {
@@ -625,6 +999,142 @@ Review with the bundled skill.`,
 		).toBe(false);
 	});
 
+	it("disables and re-syncs plugin-owned MCP servers when toggling plugins", async () => {
+		const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-data-"));
+		tempRoots.push(tempRoot);
+		const settingsPath = join(tempRoot, "cline_mcp_settings.json");
+		process.env.CLINE_GLOBAL_SETTINGS_PATH = join(
+			tempRoot,
+			"global-settings.json",
+		);
+		process.env.CLINE_MCP_SETTINGS_PATH = settingsPath;
+		const pluginPath = await writeMcpSettingsPlugin(tempRoot);
+		await writeFile(
+			settingsPath,
+			`${JSON.stringify(
+				{
+					mcpServers: {
+						smoke: {
+							transport: {
+								type: "stdio",
+								command: process.execPath,
+								args: ["-e", "process.exit(0)"],
+							},
+							oauth: {
+								tokens: {
+									access_token: "token",
+								},
+							},
+							metadata: {
+								source: "plugin",
+								pluginName: "settings-mcp-plugin",
+								pluginPath,
+							},
+						},
+					},
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		const loader = createInteractiveConfigDataLoader({
+			config: createConfig(tempRoot),
+		});
+		const item: InteractiveConfigItem = {
+			id: pluginPath,
+			name: "settings-mcp-plugin",
+			path: pluginPath,
+			enabled: true,
+			source: "workspace-plugin",
+			kind: "plugin",
+		};
+
+		await loader.onToggleConfigItem(item);
+		let settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+			mcpServers?: Record<
+				string,
+				{ disabled?: boolean; oauth?: { tokens?: Record<string, string> } }
+			>;
+		};
+		expect(settings.mcpServers?.smoke?.disabled).toBe(true);
+		expect(settings.mcpServers?.smoke?.oauth?.tokens?.access_token).toBe(
+			"token",
+		);
+
+		await loader.onToggleConfigItem({ ...item, enabled: false });
+		settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+			mcpServers?: Record<
+				string,
+				{ disabled?: boolean; oauth?: { tokens?: Record<string, string> } }
+			>;
+		};
+		expect(settings.mcpServers?.smoke?.disabled).toBeUndefined();
+		expect(settings.mcpServers?.smoke?.oauth?.tokens?.access_token).toBe(
+			"token",
+		);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"does not mark plugin disabled when MCP disable write fails",
+		async () => {
+			const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-data-"));
+			tempRoots.push(tempRoot);
+			const settingsPath = join(tempRoot, "cline_mcp_settings.json");
+			const globalSettingsPath = join(tempRoot, "global-settings.json");
+			process.env.CLINE_GLOBAL_SETTINGS_PATH = globalSettingsPath;
+			process.env.CLINE_MCP_SETTINGS_PATH = settingsPath;
+			const pluginPath = await writeMcpSettingsPlugin(tempRoot);
+			await writeFile(
+				settingsPath,
+				`${JSON.stringify(
+					{
+						mcpServers: {
+							smoke: {
+								transport: {
+									type: "stdio",
+									command: process.execPath,
+									args: ["-e", "process.exit(0)"],
+								},
+								metadata: {
+									source: "plugin",
+									pluginName: "settings-mcp-plugin",
+									pluginPath,
+								},
+							},
+						},
+					},
+					null,
+					2,
+				)}\n`,
+			);
+			await chmod(settingsPath, 0o444);
+			const loader = createInteractiveConfigDataLoader({
+				config: createConfig(tempRoot),
+			});
+
+			try {
+				await expect(
+					loader.onToggleConfigItem({
+						id: pluginPath,
+						name: "settings-mcp-plugin",
+						path: pluginPath,
+						enabled: true,
+						source: "workspace-plugin",
+						kind: "plugin",
+					}),
+				).rejects.toThrow();
+			} finally {
+				await chmod(settingsPath, 0o644);
+			}
+
+			await expect(readFile(globalSettingsPath, "utf8")).rejects.toThrow();
+			const settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+				mcpServers?: Record<string, { disabled?: boolean }>;
+			};
+			expect(settings.mcpServers?.smoke?.disabled).toBeUndefined();
+		},
+	);
+
 	it("surfaces MCP OAuth status and errors", async () => {
 		const tempRoot = await mkdtemp(join(tmpdir(), "cli-config-data-"));
 		tempRoots.push(tempRoot);
@@ -669,9 +1179,11 @@ Review with the bundled skill.`,
 		const linear = data.mcp.find((item) => item.name === "linear");
 		const docs = data.mcp.find((item) => item.name === "docs");
 
-		expect(linear?.description).toBe("streamableHttp, oauth error");
+		expect(linear?.description).toBe(
+			"streamableHttp, oauth error, timeout 60s",
+		);
 		expect(linear?.loadError).toBe("OAuth authorization failed");
-		expect(docs?.description).toBe("sse, oauth authorized");
+		expect(docs?.description).toBe("sse, oauth authorized, timeout 60s");
 		expect(docs?.loadError).toBeUndefined();
 	});
 

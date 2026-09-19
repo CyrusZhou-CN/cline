@@ -1,12 +1,20 @@
 import {
+	type CoreSettingsListInput,
+	type CoreSettingsMutationResult,
+	type CoreSettingsSnapshot,
+	type CoreSettingsToggleInput,
 	createCoreSettingsService,
+	disablePluginMcpServersInSettings,
 	setDisabledPlugin,
 	setDisabledTools,
+	syncPluginMcpServersToSettings,
 	type UserInstructionConfigService,
+	uninstallPlugin,
 } from "@cline/core";
 import {
 	type InteractiveConfigData,
 	type InteractiveConfigItem,
+	isToggleableInteractiveConfigItem,
 	type LoadInteractiveConfigDataOptions,
 	loadInteractiveConfigData,
 } from "../../tui/interactive-config";
@@ -15,6 +23,12 @@ import type { Config } from "../../utils/types";
 export function createInteractiveConfigDataLoader(input: {
 	config: Config;
 	userInstructionService?: UserInstructionConfigService;
+	loadCoreSettings?: (
+		input: CoreSettingsListInput,
+	) => Promise<CoreSettingsSnapshot>;
+	toggleCoreSettings?: (
+		input: CoreSettingsToggleInput,
+	) => Promise<CoreSettingsMutationResult>;
 }) {
 	const workspaceRoot = () =>
 		input.config.workspaceRoot?.trim() || input.config.cwd;
@@ -25,21 +39,56 @@ export function createInteractiveConfigDataLoader(input: {
 		enableSpawnAgent: input.config.enableSpawnAgent,
 		enableAgentTeams: input.config.enableAgentTeams,
 	});
-	const loadConfigData = async (
+	const buildSettingsInput = (
 		options: LoadInteractiveConfigDataOptions = {},
-	): Promise<InteractiveConfigData> =>
-		await loadInteractiveConfigData({
+	): CoreSettingsListInput => ({
+		cwd: input.config.cwd,
+		workspaceRoot: workspaceRoot(),
+		availabilityContext: availabilityContext(),
+		agentPluginPaths: input.config.agentPluginPaths,
+		includePluginTools: options.includePluginTools,
+	});
+	const buildConfigData = async (
+		options: LoadInteractiveConfigDataOptions,
+		agentPluginSettings: CoreSettingsSnapshot | undefined,
+	): Promise<InteractiveConfigData> => {
+		return await loadInteractiveConfigData({
 			userInstructionService: input.userInstructionService,
 			cwd: input.config.cwd,
 			workspaceRoot: workspaceRoot(),
 			availabilityContext: availabilityContext(),
 			includePluginTools: options.includePluginTools,
+			agentPluginSettings,
 		});
+	};
+	const loadConfigData = async (
+		options: LoadInteractiveConfigDataOptions = {},
+	): Promise<InteractiveConfigData> => {
+		const agentPluginSettings = await input
+			.loadCoreSettings?.(buildSettingsInput(options))
+			.catch(() => undefined);
+		return await buildConfigData(options, agentPluginSettings);
+	};
+
+	const refreshUserInstructionConfigs = async (): Promise<void> => {
+		const service = input.userInstructionService;
+		if (!service) {
+			return;
+		}
+		await Promise.all([
+			service.refreshType("workflow"),
+			service.refreshType("rule"),
+			service.refreshType("skill"),
+		]);
+	};
 
 	const onToggleConfigItem = async (
 		item: InteractiveConfigItem,
 		options: LoadInteractiveConfigDataOptions = {},
 	): Promise<InteractiveConfigData | undefined> => {
+		if (!isToggleableInteractiveConfigItem(item)) {
+			return undefined;
+		}
 		const settings = createCoreSettingsService();
 		if (item.kind === "skill" && typeof item.enabled === "boolean") {
 			await settings.toggle({
@@ -57,7 +106,48 @@ export function createInteractiveConfigDataLoader(input: {
 		}
 
 		if (item.kind === "plugin" && typeof item.enabled === "boolean") {
-			setDisabledPlugin(item.path, item.enabled);
+			if (item.agentPlugin === true) {
+				if (!input.toggleCoreSettings) {
+					throw new Error(
+						"Agent Plugin settings require a connected Cline Hub.",
+					);
+				}
+				const result = await input.toggleCoreSettings({
+					...buildSettingsInput(options),
+					type: "plugins",
+					id: item.id,
+					path: item.path,
+					name: item.name,
+					enabled: !item.enabled,
+				});
+				return await buildConfigData(options, result.snapshot);
+			}
+			if (item.enabled) {
+				disablePluginMcpServersInSettings({ pluginPaths: [item.path] });
+				setDisabledPlugin(item.path, true);
+			} else {
+				const ownedMcpMutations = disablePluginMcpServersInSettings({
+					pluginPaths: [item.path],
+				});
+				const result = await syncPluginMcpServersToSettings({
+					pluginPaths: [item.path],
+					cwd: input.config.cwd,
+					workspacePath: workspaceRoot(),
+					providerId: input.config.providerId,
+					modelId: input.config.modelId,
+				});
+				if (ownedMcpMutations.length > 0 && result.failures.length > 0) {
+					throw new Error(
+						`Failed to sync plugin MCP servers: ${result.failures
+							.map((failure) => {
+								const plugin = failure.pluginName ?? failure.pluginPath;
+								return `${plugin}: ${failure.message}`;
+							})
+							.join("; ")}`,
+					);
+				}
+				setDisabledPlugin(item.path, false);
+			}
 			return undefined;
 		}
 
@@ -106,8 +196,30 @@ export function createInteractiveConfigDataLoader(input: {
 		return undefined;
 	};
 
+	const onDeleteConfigItem = async (
+		item: InteractiveConfigItem,
+		options: LoadInteractiveConfigDataOptions = {},
+	): Promise<InteractiveConfigData | undefined> => {
+		if (
+			item.kind !== "plugin" ||
+			item.agentPlugin === true ||
+			item.deletable === false
+		) {
+			return undefined;
+		}
+		await uninstallPlugin({
+			path: item.path,
+			name: item.name,
+			cwd: input.config.cwd,
+			workspaceRoot: workspaceRoot(),
+		});
+		await refreshUserInstructionConfigs();
+		return await loadConfigData(options);
+	};
+
 	return {
 		loadConfigData,
 		onToggleConfigItem,
+		onDeleteConfigItem,
 	};
 }

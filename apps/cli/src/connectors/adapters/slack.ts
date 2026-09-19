@@ -9,6 +9,7 @@ import {
 	type Adapter,
 	Chat,
 	ConsoleLogger,
+	type Message,
 	type Thread,
 	ThreadImpl,
 } from "chat";
@@ -27,7 +28,7 @@ import {
 	enqueueThreadTurn,
 	startConnectorWebhookServer,
 } from "../chat-runtime";
-import { isProcessRunning } from "../common";
+import { CONNECT_ALREADY_RUNNING_EXIT_CODE, isProcessRunning } from "../common";
 import {
 	type ActiveConnectorTurn,
 	handleConnectorUserTurn,
@@ -50,34 +51,38 @@ import {
 	type ConnectorThreadBinding,
 	type ConnectorThreadState,
 	clearBindingSessionIds,
-	findBindingForParticipantKey,
+	findBindingForDeliveryTarget,
 	findBindingForThread,
 	loadThreadState,
 	persistMergedThreadState,
 	readBindings,
+	resolveThreadTurnQueueKey,
 	writeBindings,
 } from "../thread-bindings";
 import type {
 	ConnectCommandDefinition,
 	ConnectIo,
+	ConnectRunContext,
 	ConnectStopResult,
 } from "../types";
-import {
-	getConnectorFirstContactMessage,
-	getConnectorSystemPrompt,
-	getConnectorSystemRules,
-} from "./prompts";
+import { getConnectorSystemPrompt, getConnectorSystemRules } from "./prompts";
 
 const SLACK_SYSTEM_RULES = getConnectorSystemRules(
 	"Slack",
 	"You can respond to user messages in threads and DMs, and you can use tools according to user's requests and your capabilities.",
 );
 
-const SLACK_FIRST_CONTACT_MESSAGE = getConnectorFirstContactMessage();
-
 type SlackThreadState = ConnectorThreadState & {
 	teamId?: string;
 };
+
+type SlackConnectionMode = ConnectSlackOptions["connectionMode"];
+
+function inferSlackConnectionMode(
+	baseUrl: string | undefined,
+): SlackConnectionMode {
+	return baseUrl?.trim() ? "webhook" : "socket";
+}
 
 function truncateText(value: string, maxLength = 160): string {
 	return truncateConnectorText(value, maxLength);
@@ -182,6 +187,110 @@ function extractSlackTeamId(raw: unknown): string | undefined {
 				? record.team
 				: undefined;
 	return value?.trim() || undefined;
+}
+
+function extractSlackMessageRecord(
+	raw: unknown,
+): Record<string, unknown> | undefined {
+	const record = asRecord(raw);
+	return asRecord(record?.event) ?? asRecord(record?.message) ?? record;
+}
+
+function extractSlackChannelFromId(id: string): string | undefined {
+	const parts = id.split(":");
+	return parts[0] === "slack" ? readString(parts[1]) : undefined;
+}
+
+/**
+ * Slack delivers `@cline hi` as `<@U0B8E8H3U1F> hi`, and the chat SDK
+ * deliberately leaves the bot's own mention unresolved (so mention detection
+ * keeps working), flattening it to `@U0B8E8H3U1F hi`. Strip that leading
+ * self-mention so the agent receives `hi`.
+ *
+ * Only leading mentions of the bot itself are removed; mentions of other users
+ * (already resolved to `@display-name`) and inline mentions are preserved so
+ * the agent still sees who was addressed. A bare mention with no other content
+ * is left untouched so the turn still reaches the agent instead of being
+ * dropped as empty input.
+ */
+function stripSlackBotMention(
+	text: string,
+	botUserId: string | undefined,
+): string {
+	const botId = botUserId?.trim();
+	if (!botId || !text) {
+		return text;
+	}
+	const escapedBotId = botId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	// Matches `<@U123>`, `<@U123|name>` and the SDK-flattened `@U123` form,
+	// repeated when a user mentions the bot more than once up front.
+	//
+	// The angle-bracket forms are delimited by `>`, but the flattened form has no
+	// closing delimiter, so it needs an explicit boundary. Without one, `@U123`
+	// also matches the start of a longer id belonging to someone else, turning
+	// `@U1234 help` into `4 help`. Slack ids are uppercase alphanumeric, so a
+	// complete mention is one that is not followed by another id character.
+	// `\b` cannot express this: ids end in word characters, so `@U123\b` still
+	// matches inside `@U1234`.
+	const leadingMention = new RegExp(
+		`^(?:\\s*(?:<@${escapedBotId}(?:\\|[^<>]*)?>|@${escapedBotId}(?![A-Za-z0-9]))[\\s,:]*)+`,
+	);
+	const stripped = text.replace(leadingMention, "");
+	return stripped.trim() ? stripped.trimStart() : text;
+}
+
+/**
+ * The adapter exposes the authenticated bot user id (request-scoped in
+ * multi-workspace mode). When it is not yet known, fall back to the id Slack
+ * reports as the authorized app user on the event envelope.
+ */
+function resolveSlackBotUserId(
+	slack: Pick<SlackAdapter, "botUserId">,
+	rawMessage?: unknown,
+): string | undefined {
+	const raw = asRecord(rawMessage);
+	return (
+		readString(slack.botUserId) ??
+		readString(firstRecord(raw?.authorizations)?.user_id)
+	);
+}
+
+function resolveSlackChannelMentionThread(
+	thread: Thread<SlackThreadState>,
+	message: Message,
+): Thread<SlackThreadState> {
+	if (thread.isDM) {
+		return thread;
+	}
+	const event = extractSlackMessageRecord(message.raw);
+	const threadTs = readString(event?.thread_ts) ?? readString(event?.ts);
+	if (!threadTs) {
+		return thread;
+	}
+	const channel =
+		readString(event?.channel) ??
+		extractSlackChannelFromId(thread.id) ??
+		extractSlackChannelFromId(thread.channelId);
+	if (!channel) {
+		return thread;
+	}
+	const threadId = `slack:${channel}:${threadTs}`;
+	const channelId = `slack:${channel}`;
+	if (thread.id === threadId && thread.channelId === channelId) {
+		return thread;
+	}
+	return new ThreadImpl<SlackThreadState>({
+		adapterName: "slack",
+		channelId,
+		channelVisibility: thread.channelVisibility,
+		currentMessage: message,
+		fallbackStreamingPlaceholderText: null,
+		id: threadId,
+		initialMessage: message,
+		isDM: false,
+		isSubscribedContext: false,
+		streamingUpdateIntervalMs: 500,
+	});
 }
 
 async function withSlackBindingBotToken<T>(input: {
@@ -317,20 +426,20 @@ async function deliverScheduledResult(input: {
 	const threadId =
 		typeof delivery.threadId === "string" ? delivery.threadId.trim() : "";
 	const bindingKey =
-		typeof delivery.bindingKey === "string"
-			? delivery.bindingKey.trim()
-			: typeof delivery.participantKey === "string"
-				? delivery.participantKey.trim()
-				: "";
-	if (!threadId && !bindingKey) {
+		typeof delivery.bindingKey === "string" ? delivery.bindingKey.trim() : "";
+	const participantKey =
+		typeof delivery.participantKey === "string"
+			? delivery.participantKey.trim()
+			: "";
+	if (!threadId && !bindingKey && !participantKey) {
 		return;
 	}
 	const bindings = readBindings<SlackThreadState>(input.bindingsPath);
-	const match = bindingKey
-		? findBindingForParticipantKey(bindings, bindingKey)
-		: threadId
-			? { key: threadId, binding: bindings[threadId] }
-			: undefined;
+	const match = findBindingForDeliveryTarget(bindings, {
+		bindingKey,
+		threadId,
+		participantKey,
+	});
 	const binding = match?.binding;
 	const deliveryThreadId = match?.key || threadId || bindingKey;
 	if (!binding?.serializedThread) {
@@ -380,64 +489,75 @@ class SlackConnector extends ConnectorBase<
 	SlackConnectorState
 > {
 	constructor() {
-		super("slack", "Slack webhook bridge backed by RPC runtime sessions");
+		super(
+			"slack",
+			"Slack webhook/socket bridge backed by RPC runtime sessions",
+		);
 	}
 
 	protected override createCommand(): Command {
-		return super
-			.createCommand()
-			.usage("--base-url <PUBLIC_BASE_URL> [options]")
-			.option("--user-name <name>", "Slack bot username label")
-			.option(
-				"--bot-token <token>",
-				"Slack bot token for single-workspace mode",
-			)
-			.option("--signing-secret <secret>", "Slack signing secret")
-			.option("--client-id <id>", "Slack OAuth client id")
-			.option("--client-secret <secret>", "Slack OAuth client secret")
-			.option(
-				"--encryption-key <key>",
-				"Base64 32-byte key for encrypted installations",
-			)
-			.option(
-				"--installation-key-prefix <prefix>",
-				"Override stored installation key prefix",
-			)
-			.option("--provider <id>", "Provider override")
-			.option("--model <id>", "Model override")
-			.option("--api-key <key>", "Provider API key override")
-			.option("--system <prompt>", "System prompt override")
-			.option("--cwd <path>", "Workspace / cwd for runtime")
-			.option("--mode <act|plan>", "Agent mode", "act")
-			.option("-i, --interactive", "Keep connector in foreground")
-			.option("--enable-tools", "Enable tools for Slack sessions")
-			.option(
-				"--hook-command <command>",
-				"Run a shell command for connector events",
-			)
-			.option(
-				"--rpc-address <host:port>",
-				"RPC address",
-				process.env.CLINE_RPC_ADDRESS?.trim() || resolveDefaultCliRpcAddress(),
-			)
-			.option("--host <host>", "Webhook listen host")
-			.option("--port <port>", "Webhook listen port")
-			.option(
-				"--base-url <url>",
-				"Public base URL for webhooks and OAuth callback",
-			)
-			.addHelpText(
-				"after",
-				[
-					"",
-					"Environment:",
-					"  SLACK_BOT_TOKEN             Single-workspace bot token",
-					"  SLACK_SIGNING_SECRET        Slack signing secret",
-					"  SLACK_CLIENT_ID             OAuth client id",
-					"  SLACK_CLIENT_SECRET         OAuth client secret",
-					"  SLACK_ENCRYPTION_KEY        Optional installation encryption key",
-				].join("\n"),
-			);
+		return (
+			super
+				.createCommand()
+				.usage("--base-url <PUBLIC_BASE_URL> [options]")
+				.option("--user-name <name>", "Slack bot username label")
+				.option(
+					"--bot-token <token>",
+					"Slack bot token for single-workspace mode",
+				)
+				.option("--signing-secret <secret>", "Slack signing secret")
+				.option("--app-token <token>", "Slack app-level token for socket mode")
+				.option("--client-id <id>", "Slack OAuth client id")
+				.option("--client-secret <secret>", "Slack OAuth client secret")
+				.option(
+					"--encryption-key <key>",
+					"Base64 32-byte key for encrypted installations",
+				)
+				.option(
+					"--installation-key-prefix <prefix>",
+					"Override stored installation key prefix",
+				)
+				.option("--provider <id>", "Provider override")
+				.option("--model <id>", "Model override")
+				.option("--api-key <key>", "Provider API key override")
+				.option("--system <prompt>", "System prompt override")
+				.option("--cwd <path>", "Workspace / cwd for runtime")
+				.option("--mode <act|plan>", "Agent mode", "act")
+				.option("-i, --interactive", "Keep connector in foreground")
+				.option("--no-tools", "Disable tools for Slack sessions")
+				// Retained so existing invocations and persisted autostart arguments
+				// keep parsing; tools are on unless --no-tools is passed.
+				.option("--enable-tools", "Enable tools (default)")
+				.option(
+					"--hook-command <command>",
+					"Run a shell command for connector events",
+				)
+				.option(
+					"--rpc-address <host:port>",
+					"RPC address",
+					process.env.CLINE_RPC_ADDRESS?.trim() ||
+						resolveDefaultCliRpcAddress(),
+				)
+				.option("--host <host>", "Webhook listen host")
+				.option("--port <port>", "Webhook listen port")
+				.option(
+					"--base-url <url>",
+					"Public base URL for webhooks and OAuth callback",
+				)
+				.addHelpText(
+					"after",
+					[
+						"",
+						"Environment:",
+						"  SLACK_BOT_TOKEN             Single-workspace bot token",
+						"  SLACK_SIGNING_SECRET        Slack signing secret",
+						"  SLACK_APP_TOKEN             App-level token for socket mode",
+						"  SLACK_CLIENT_ID             OAuth client id",
+						"  SLACK_CLIENT_SECRET         OAuth client secret",
+						"  SLACK_ENCRYPTION_KEY        Optional installation encryption key",
+					].join("\n"),
+				)
+		);
 	}
 
 	protected override readOptions(command: Command): ConnectSlackOptions {
@@ -445,6 +565,7 @@ class SlackConnector extends ConnectorBase<
 			userName?: string;
 			botToken?: string;
 			signingSecret?: string;
+			appToken?: string;
 			clientId?: string;
 			clientSecret?: string;
 			encryptionKey?: string;
@@ -457,6 +578,7 @@ class SlackConnector extends ConnectorBase<
 			mode?: string;
 			interactive?: boolean;
 			enableTools?: boolean;
+			tools?: boolean;
 			rpcAddress?: string;
 			hookCommand?: string;
 			port?: string;
@@ -467,17 +589,50 @@ class SlackConnector extends ConnectorBase<
 			this.parseOptionalInteger(opts.port, "port") ??
 			Number.parseInt(process.env.PORT ?? "8787", 10);
 		const port = Number.isFinite(parsedPort) ? parsedPort : 8787;
+		const baseUrl = opts.baseUrl?.trim() || process.env.BASE_URL?.trim();
+		const connectionMode = inferSlackConnectionMode(baseUrl);
+		const isSocketMode = connectionMode === "socket";
+		if (isSocketMode && (opts.clientId?.trim() || opts.clientSecret?.trim())) {
+			throw new Error(
+				"Slack socket mode does not support --client-id or --client-secret",
+			);
+		}
+		const botToken =
+			opts.botToken?.trim() || process.env.SLACK_BOT_TOKEN?.trim();
+		const appToken = isSocketMode
+			? opts.appToken?.trim() || process.env.SLACK_APP_TOKEN?.trim()
+			: undefined;
+		if (isSocketMode && !appToken) {
+			throw new Error(
+				"Slack socket mode requires --app-token or SLACK_APP_TOKEN",
+			);
+		}
+		if (isSocketMode && !botToken) {
+			throw new Error(
+				"Slack socket mode requires --bot-token or SLACK_BOT_TOKEN",
+			);
+		}
 		return {
 			userName:
 				opts.userName?.trim() ||
 				process.env.SLACK_BOT_USERNAME?.trim() ||
 				"cline-slack",
-			botToken: opts.botToken?.trim() || process.env.SLACK_BOT_TOKEN?.trim(),
+			connectionMode,
+			botToken,
 			signingSecret:
-				opts.signingSecret?.trim() || process.env.SLACK_SIGNING_SECRET?.trim(),
-			clientId: opts.clientId?.trim() || process.env.SLACK_CLIENT_ID?.trim(),
+				connectionMode === "webhook"
+					? opts.signingSecret?.trim() ||
+						process.env.SLACK_SIGNING_SECRET?.trim()
+					: opts.signingSecret?.trim(),
+			appToken,
+			clientId:
+				connectionMode === "webhook"
+					? opts.clientId?.trim() || process.env.SLACK_CLIENT_ID?.trim()
+					: undefined,
 			clientSecret:
-				opts.clientSecret?.trim() || process.env.SLACK_CLIENT_SECRET?.trim(),
+				connectionMode === "webhook"
+					? opts.clientSecret?.trim() || process.env.SLACK_CLIENT_SECRET?.trim()
+					: undefined,
 			encryptionKey:
 				opts.encryptionKey?.trim() || process.env.SLACK_ENCRYPTION_KEY?.trim(),
 			installationKeyPrefix:
@@ -490,7 +645,7 @@ class SlackConnector extends ConnectorBase<
 			systemPrompt: opts.system,
 			mode: this.parseMode(opts.mode),
 			interactive: Boolean(opts.interactive),
-			enableTools: Boolean(opts.enableTools),
+			enableTools: opts.tools !== false,
 			rpcAddress:
 				opts.rpcAddress?.trim() ||
 				process.env.CLINE_RPC_ADDRESS?.trim() ||
@@ -500,10 +655,7 @@ class SlackConnector extends ConnectorBase<
 				process.env.CLINE_CONNECT_HOOK_COMMAND?.trim(),
 			port,
 			host: opts.host?.trim() || process.env.HOST?.trim() || "0.0.0.0",
-			baseUrl:
-				opts.baseUrl?.trim() ||
-				process.env.BASE_URL?.trim() ||
-				`http://127.0.0.1:${port}`,
+			baseUrl,
 		};
 	}
 
@@ -532,6 +684,9 @@ class SlackConnector extends ConnectorBase<
 				Boolean(
 					value &&
 						typeof value === "object" &&
+						// claimId is optional: state files written by older CLI
+						// versions predate claiming and must stay manageable
+						// (already-running detection, status, stop).
 						typeof (value as SlackConnectorState).pid === "number" &&
 						typeof (value as SlackConnectorState).userName === "string",
 				),
@@ -573,41 +728,89 @@ class SlackConnector extends ConnectorBase<
 		);
 	}
 
+	override async stopInstance(
+		instanceId: string,
+		io: ConnectIo,
+	): Promise<ConnectStopResult> {
+		return await this.stopSlackConnectorInstance(
+			this.resolveConnectorStatePath(instanceId),
+			io,
+		);
+	}
+
+	protected override instanceIdFromOptions(
+		options: ConnectSlackOptions,
+	): string | undefined {
+		return options.userName;
+	}
+
 	protected override async runWithOptions(
 		options: ConnectSlackOptions,
 		rawArgs: string[],
 		io: ConnectIo,
+		context: ConnectRunContext,
 	): Promise<number> {
+		context.setPersistenceInstanceId(options.userName);
 		const statePath = this.resolveConnectorStatePath(options.userName);
 		const bindingsPath = this.resolveBindingsPath(options.userName);
 		const stateStorePath = this.resolveStateStorePath(options.userName);
-		const staleState = this.removeStaleState(
-			statePath,
-			(path) => this.readConnectorState(path),
-			(state) => state.pid,
-		);
+		const existingState = this.readConnectorState(statePath);
+		const staleState =
+			existingState && !isProcessRunning(existingState.pid)
+				? existingState
+				: undefined;
 		if (staleState) {
 			clearBindingSessionIds<SlackThreadState>(bindingsPath);
 		}
-		if (
-			await this.maybeRunInBackground({
-				rawArgs,
-				io,
-				interactive: options.interactive,
-				childEnvVar: "CLINE_SLACK_CONNECT_CHILD",
-				statePath,
-				readState: (path) => this.readConnectorState(path),
-				isRunning: (state) => isProcessRunning(state.pid),
-				formatAlreadyRunningMessage: (state) =>
-					`[slack] connector already running pid=${state.pid} rpc=${state.rpcAddress} url=${state.baseUrl}`,
-				formatBackgroundStartMessage: (pid) =>
-					`[slack] starting background connector pid=${pid} user=${options.userName}`,
-				foregroundHint:
-					"[slack] use `cline connect slack -i ...` to run in the foreground",
-				launchFailureMessage: "failed to launch Slack connector in background",
-			})
-		) {
-			return 0;
+		const formatAlreadyRunning = (state: SlackConnectorState) =>
+			state.connectionMode === "socket"
+				? `[slack] connector already running pid=${state.pid} rpc=${state.rpcAddress} mode=socket`
+				: `[slack] connector already running pid=${state.pid} rpc=${state.rpcAddress} url=${state.baseUrl}`;
+		const backgroundExitCode = await this.maybeRunInBackground({
+			rawArgs,
+			io,
+			interactive: options.interactive,
+			childEnvVar: "CLINE_SLACK_CONNECT_CHILD",
+			statePath,
+			readState: (path) => this.readConnectorState(path),
+			isRunning: (state) => isProcessRunning(state.pid),
+			formatAlreadyRunningMessage: formatAlreadyRunning,
+			formatBackgroundStartMessage: (pid) =>
+				`[slack] starting background connector pid=${pid} user=${options.userName} mode=${options.connectionMode}`,
+			foregroundHint:
+				"[slack] use `cline connect slack -i ...` to run in the foreground",
+			launchFailureMessage: "failed to launch Slack connector in background",
+		});
+		if (backgroundExitCode !== undefined) {
+			return backgroundExitCode;
+		}
+
+		// Foreground / detached-child path: exclusively claim the instance before
+		// opening Slack socket-mode so a second process cannot share the token.
+		const startedAt = new Date().toISOString();
+		const claim = this.claimConnectorInstance({
+			statePath,
+			createState: (claimId) => ({
+				claimId,
+				userName: options.userName,
+				connectionMode: options.connectionMode,
+				pid: process.pid,
+				rpcAddress: "pending",
+				startedAt,
+				...(options.connectionMode === "webhook"
+					? { port: options.port, baseUrl: options.baseUrl }
+					: {}),
+			}),
+			readState: (path) => this.readConnectorState(path),
+			getPid: (state) => state.pid,
+		});
+		if (!claim.claimed) {
+			io.writeln(
+				claim.running
+					? formatAlreadyRunning(claim.running)
+					: `[slack] connector already running for user=${options.userName}`,
+			);
+			return CONNECT_ALREADY_RUNNING_EXIT_CODE;
 		}
 
 		const loggerAdapter = createCliLoggerAdapter({
@@ -618,6 +821,7 @@ class SlackConnector extends ConnectorBase<
 		const consoleLogger = new ConsoleLogger("info", "slack-connect");
 		const slackConfig: Record<string, unknown> = {
 			logger: consoleLogger,
+			mode: options.connectionMode,
 			userName: options.userName,
 		};
 		if (options.botToken?.trim()) {
@@ -625,6 +829,9 @@ class SlackConnector extends ConnectorBase<
 		}
 		if (options.signingSecret?.trim()) {
 			slackConfig.signingSecret = options.signingSecret.trim();
+		}
+		if (options.appToken?.trim()) {
+			slackConfig.appToken = options.appToken.trim();
 		}
 		if (options.clientId?.trim()) {
 			slackConfig.clientId = options.clientId.trim();
@@ -693,12 +900,15 @@ class SlackConnector extends ConnectorBase<
 		});
 		await client.connect();
 		this.writeConnectorState(statePath, {
+			claimId: claim.claimId,
 			userName: options.userName,
+			connectionMode: options.connectionMode,
 			pid: process.pid,
 			rpcAddress,
-			port: options.port,
-			baseUrl: options.baseUrl,
-			startedAt: new Date().toISOString(),
+			...(options.connectionMode === "webhook"
+				? { port: options.port, baseUrl: options.baseUrl }
+				: {}),
+			startedAt,
 		});
 
 		let stopping = false;
@@ -723,7 +933,9 @@ class SlackConnector extends ConnectorBase<
 				bindingsPath,
 				startRequest,
 			);
-			const queueKey = currentState.participantKey || thread.id;
+			const queueKey = resolveThreadTurnQueueKey(thread);
+			const enqueueTurn = (work: () => Promise<void>) =>
+				enqueueThreadTurn(threadQueues, queueKey, work);
 			const runTurn = async () => {
 				try {
 					await withSlackTeamBotToken({
@@ -748,10 +960,10 @@ class SlackConnector extends ConnectorBase<
 								hookCommand: options.hookCommand,
 								systemRules: SLACK_SYSTEM_RULES,
 								errorLabel: "Slack",
-								firstContactMessage: SLACK_FIRST_CONTACT_MESSAGE,
 								userInstructionService,
 								chatCommandHost,
 								activeTurns,
+								enqueueTurn,
 								turnKey: queueKey,
 								getSessionMetadata: (
 									currentThread,
@@ -836,24 +1048,27 @@ class SlackConnector extends ConnectorBase<
 				await runTurn();
 				return;
 			}
-			await enqueueThreadTurn(threadQueues, queueKey, async () => {
-				await runTurn();
-			});
+			await enqueueTurn(runTurn);
 		};
 
 		bot.onNewMention(async (thread, message) => {
-			await thread.subscribe();
+			const mentionThread = resolveSlackChannelMentionThread(thread, message);
+			await mentionThread.subscribe();
 			await persistSlackThreadContext({
-				thread,
+				thread: mentionThread,
 				bindingsPath,
 				baseStartRequest: startRequest,
 				rawMessage: message.raw,
 				errorLabel: "Slack",
 			});
+			const text = stripSlackBotMention(
+				message.text,
+				resolveSlackBotUserId(slack, message.raw),
+			);
 			if (
 				await maybeHandleConnectorApprovalReply({
-					thread,
-					text: message.text,
+					thread: mentionThread,
+					text,
 					client,
 					clientId,
 					pendingApprovals,
@@ -862,7 +1077,7 @@ class SlackConnector extends ConnectorBase<
 			) {
 				return;
 			}
-			await handleTurn(thread, message.text);
+			await handleTurn(mentionThread, text);
 		});
 
 		bot.onSubscribedMessage(async (thread, message) => {
@@ -873,10 +1088,14 @@ class SlackConnector extends ConnectorBase<
 				rawMessage: message.raw,
 				errorLabel: "Slack",
 			});
+			const text = stripSlackBotMention(
+				message.text,
+				resolveSlackBotUserId(slack, message.raw),
+			);
 			if (
 				await maybeHandleConnectorApprovalReply({
 					thread,
-					text: message.text,
+					text,
 					client,
 					clientId,
 					pendingApprovals,
@@ -885,7 +1104,7 @@ class SlackConnector extends ConnectorBase<
 			) {
 				return;
 			}
-			await handleTurn(thread, message.text);
+			await handleTurn(thread, text);
 		});
 
 		bot.onSlashCommand(async (event) => {
@@ -948,48 +1167,64 @@ class SlackConnector extends ConnectorBase<
 				},
 			});
 
-		const webhookUrl = `${options.baseUrl.replace(/\/$/, "")}/api/webhooks/slack`;
-		const oauthCallbackUrl = `${options.baseUrl.replace(/\/$/, "")}/api/oauth/slack/callback`;
-		const server = await startConnectorWebhookServer({
-			host: options.host,
-			port: options.port,
-			routes: {
-				"/api/webhooks/slack": async (request) => bot.webhooks.slack(request),
-				"/api/oauth/slack/callback": async (request) => {
-					try {
-						const result = await slack.handleOAuthCallback(request);
-						return new Response(
-							`Slack installation stored for team ${result.teamId}. You can return to Slack.`,
-						);
-					} catch (error) {
-						const message =
-							error instanceof Error ? error.message : String(error);
-						loggerAdapter.core.log("Slack OAuth callback failed", {
-							severity: "warn",
-							transport: "slack",
-							error: message,
+		let webhookUrl: string | undefined;
+		let oauthCallbackUrl: string | undefined;
+		const server =
+			options.connectionMode === "webhook"
+				? await (async () => {
+						const baseUrl = options.baseUrl?.trim();
+						if (!baseUrl) {
+							throw new Error(
+								"Slack webhook mode requires --base-url or BASE_URL",
+							);
+						}
+						webhookUrl = `${baseUrl.replace(/\/$/, "")}/api/webhooks/slack`;
+						oauthCallbackUrl = `${baseUrl.replace(/\/$/, "")}/api/oauth/slack/callback`;
+						return startConnectorWebhookServer({
+							host: options.host,
+							port: options.port,
+							routes: {
+								"/api/webhooks/slack": async (request) =>
+									bot.webhooks.slack(request),
+								"/api/oauth/slack/callback": async (request) => {
+									try {
+										const result = await slack.handleOAuthCallback(request);
+										return new Response(
+											`Slack installation stored for team ${result.teamId}. You can return to Slack.`,
+										);
+									} catch (error) {
+										const message =
+											error instanceof Error ? error.message : String(error);
+										loggerAdapter.core.log("Slack OAuth callback failed", {
+											severity: "warn",
+											transport: "slack",
+											error: message,
+										});
+										return new Response(`Slack OAuth error: ${message}`, {
+											status: 500,
+										});
+									}
+								},
+								"/health": () => new Response("ok"),
+								"/": () =>
+									new Response(
+										[
+											"Slack connector is running.",
+											"Connection mode: webhook",
+											`Webhook URL: ${webhookUrl}`,
+											`OAuth callback URL: ${oauthCallbackUrl}`,
+											options.botToken?.trim()
+												? "Auth mode: single workspace"
+												: options.clientId?.trim() &&
+														options.clientSecret?.trim()
+													? "Auth mode: multi-workspace OAuth"
+													: "Auth mode: incomplete (set bot token or OAuth credentials)",
+										].join("\n"),
+									),
+							},
 						});
-						return new Response(`Slack OAuth error: ${message}`, {
-							status: 500,
-						});
-					}
-				},
-				"/health": () => new Response("ok"),
-				"/": () =>
-					new Response(
-						[
-							"Slack connector is running.",
-							`Webhook URL: ${webhookUrl}`,
-							`OAuth callback URL: ${oauthCallbackUrl}`,
-							options.botToken?.trim()
-								? "Auth mode: single workspace"
-								: options.clientId?.trim() && options.clientSecret?.trim()
-									? "Auth mode: multi-workspace OAuth"
-									: "Auth mode: incomplete (set bot token or OAuth credentials)",
-						].join("\n"),
-					),
-			},
-		});
+					})()
+				: undefined;
 
 		const stopEventStream = client.streamEvents(
 			{ clientId: `${clientId}-server-events` },
@@ -1052,17 +1287,22 @@ class SlackConnector extends ConnectorBase<
 		process.once("SIGINT", () => requestStop("sigint"));
 		process.once("SIGTERM", () => requestStop("sigterm"));
 
-		io.writeln(`[slack] listening on ${options.host}:${options.port}`);
-		io.writeln(`[slack] configure Slack webhook URL: ${webhookUrl}`);
-		io.writeln(
-			`[slack] configure Slack OAuth callback URL: ${oauthCallbackUrl}`,
-		);
+		if (options.connectionMode === "webhook") {
+			io.writeln(`[slack] listening on ${options.host}:${options.port}`);
+			io.writeln(`[slack] configure Slack webhook URL: ${webhookUrl}`);
+			io.writeln(
+				`[slack] configure Slack OAuth callback URL: ${oauthCallbackUrl}`,
+			);
+		} else {
+			io.writeln("[slack] socket mode connected");
+		}
 
 		await stopPromise;
 		clearBindingSessionIds<SlackThreadState>(bindingsPath);
 		stopTaskUpdateStream();
 		stopEventStream();
-		await server.close();
+		await server?.close();
+		await bot.shutdown();
 		userInstructionService.stop();
 		client.close();
 		this.removeStateFile(statePath);
@@ -1073,9 +1313,13 @@ class SlackConnector extends ConnectorBase<
 export const slackConnector: ConnectCommandDefinition = new SlackConnector();
 
 export const __test__ = {
+	inferSlackConnectionMode,
 	buildSlackParticipantKey,
 	resolveSlackParticipant,
 	normalizeSlackMessageEventChannelType,
+	resolveSlackBotUserId,
+	resolveSlackChannelMentionThread,
+	stripSlackBotMention,
 	withSlackTeamBotToken,
 	isSlackInvalidThreadTsError,
 	findBindingForThread: (

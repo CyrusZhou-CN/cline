@@ -6,10 +6,11 @@ import { useOnboardingController } from "./controller";
 import { getOAuthProviderLabel, type OnboardingResult } from "./model";
 import {
 	OnboardingClineModelScreen,
-	OnboardingCodexCliScreen,
+	OnboardingClinePassSubscriptionScreen,
 	OnboardingCustomModelIdScreen,
 	OnboardingDeviceCodeScreen,
 	OnboardingDoneScreen,
+	OnboardingLocalCliScreen,
 	OnboardingMainMenuScreen,
 	OnboardingModelPickerScreen,
 	OnboardingOAuthPendingScreen,
@@ -82,15 +83,16 @@ export function OnboardingView(props: OnboardingViewProps) {
 		);
 	}
 
-	if (state.step === "codex_cli_setup") {
+	if (state.step === "local_cli_setup" && state.localCli) {
 		return (
-			<OnboardingCodexCliScreen
+			<OnboardingLocalCliScreen
 				activeProviderName={state.activeProviderName}
-				checking={state.codexCliChecking}
+				checking={state.localCliChecking}
+				cli={state.localCli}
 				compact={compact}
 				contentWidth={contentWidth}
 				mouse={mouse}
-				status={state.codexCliStatus}
+				status={state.localCliStatus}
 			/>
 		);
 	}
@@ -111,12 +113,29 @@ export function OnboardingView(props: OnboardingViewProps) {
 		return (
 			<OnboardingClineModelScreen
 				clineEntries={state.clineEntries}
-				clineKnownModels={state.clineKnownModels}
 				clineModelSelected={state.clineModelSelected}
 				compact={compact}
 				contentWidth={contentWidth}
 				mouse={mouse}
 				recommendedLoading={state.recommendedLoading}
+			/>
+		);
+	}
+
+	if (state.step === "cline_pass_subscription") {
+		return (
+			<OnboardingClinePassSubscriptionScreen
+				compact={compact}
+				contentWidth={contentWidth}
+				currentPlanName={state.clinePassCurrentPlanName}
+				error={state.clinePassSubscriptionError}
+				mouse={mouse}
+				openStatus={state.clinePassSubscriptionOpenStatus}
+				options={state.clinePassSubscriptionOptions}
+				planFeatures={state.clinePassPlanFeatures}
+				selected={state.clinePassSubscriptionSelected}
+				status={state.clinePassSubscriptionStatus}
+				subscriptionUrl={state.clinePassSubscriptionUrl}
 			/>
 		);
 	}
@@ -166,6 +185,7 @@ export function OnboardingView(props: OnboardingViewProps) {
 	return (
 		<OnboardingMainMenuScreen
 			contentWidth={contentWidth}
+			menuOptions={state.menuOptions}
 			menuSelected={state.menuSelected}
 			mouse={mouse}
 		/>

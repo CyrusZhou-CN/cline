@@ -5,7 +5,7 @@
 <h1 align="center">Cline</h1>
 
 <p align="center">
-The open source coding agent in your IDE and terminal.
+The open source coding agent in your IDE, terminal, & desktop.
 </p>
 
 <div align="center">
@@ -44,7 +44,7 @@ The open source coding agent in your IDE and terminal.
 ### CLI
 
 Run Cline in your terminal.
-Interactive chat or fully headless
+Interactive chat or fully headless 
 for CI/CD and scripting.
 
 ```
@@ -57,17 +57,13 @@ npm i -g cline
 </td>
 <td align="center" width="50%">
 
-### Kanban
+### Desktop App
 
-Run many agents in parallel from a
-web-based task board. Each card gets its own
-worktree, auto-commit, and dependency chains.
+Cline as a native app for macOS and Windows.
+Run agent sessions in any folder, schedule
+routines, and manage models, plugins, and MCP servers.
 
-```
-npm i -g kanban
-```
-
-<a href="https://github.com/cline/kanban">Learn more</a>
+<a href="https://cline.bot/desktop">Download for macOS and Windows</a>
 <br><br>
 
 </td>
@@ -108,7 +104,7 @@ the JetBrains family.
 
 ### SDK
 
-Build your own AI agents and integrations powered by the same engine that runs the CLI, Kanban, VS Code extension, and JetBrains plugin. Custom tools, multi-agent teams, connectors, scheduled automations, and more.
+Build your own AI agents and integrations powered by the same engine that runs the CLI, desktop app, VS Code extension, and JetBrains plugin. Custom tools, multi-agent teams, connectors, scheduled automations, and more.
 
 ```
 npm install @cline/sdk
@@ -131,8 +127,8 @@ npm install @cline/sdk
 | **SDK** | Node.js programmatic agent API and extension exports. | [`sdk/`](https://github.com/cline/cline/tree/main/sdk) | [CHANGELOG.md](https://github.com/cline/cline/blob/main/sdk/CHANGELOG.md) |
 | **CLI** | Terminal UI, headless mode, shell commands, and CLI-specific flows. | [`apps/cli/`](https://github.com/cline/cline/tree/main/apps/cli) | [CHANGELOG.md](https://github.com/cline/cline/blob/main/apps/cli/CHANGELOG.md) |
 | **VS Code Extension** | The Marketplace extension and extension host integration. | [`/`](https://github.com/cline/cline/tree/main) (WIP migrating) | [CHANGELOG.md](https://github.com/cline/cline/blob/main/CHANGELOG.md) |
+| **Desktop App** | Native macOS and Windows app (Tauri shell, Bun sidecar, Next.js UI). | [`apps/examples/desktop-app/`](https://github.com/cline/cline/tree/main/apps/examples/desktop-app) | [CHANGELOG.md](https://github.com/cline/cline/blob/main/apps/examples/desktop-app/CHANGELOG.md) |
 | **JetBrains Plugin** | JetBrains-hosted client that talks to the shared agent core. | Currently we are not open-sourcing JetBrains plugins | - |
-| **Kanban** | Web-based multi-agent task board. | [`cline/kanban`](https://github.com/cline/kanban) | [CHANGELOG.md](https://github.com/cline/kanban/blob/main/CHANGELOG.md) |
 | **Docs site** | Public documentation pages. | [`docs/`](https://docs.cline.bot/) | - |
 
 ## Edits Code Across Your Project
@@ -149,7 +145,7 @@ Toggle between Plan mode and Act mode. In Plan mode, Cline explores your codebas
 
 ## Rules and Skills
 
-Define project-specific rules in `.clinerules` files that guide how Cline works in your codebase: coding standards, architecture conventions, deployment procedures, testing requirements. Rules are picked up automatically by the CLI, VS Code extension, and JetBrains plugin. Use skills to let the model load specific rules when needed. 
+Define project-specific rules in `.clinerules` files that guide how Cline works in your codebase: coding standards, architecture conventions, deployment procedures, testing requirements. Rules are picked up automatically by the CLI, VS Code extension, and JetBrains plugin. Use skills to let the model load specific rules when needed.
 
 ## Works With Every Model
 
@@ -158,10 +154,10 @@ Cline is not locked to a single AI provider. Use whichever model fits your workf
 | Provider | Models |
 |----------|--------|
 | Anthropic | Claude Opus, Sonnet, Haiku |
-| OpenAI | GPT series model |
-| Google | Gemini series model |
+| OpenAI | GPT series models |
+| Google | Gemini series models |
 | OpenRouter | 200+ models from any provider |
-| Vercel AI Gateway | Models through Vercel AI Gateway |
+| Vercel AI Gateway | Route to many providers through one gateway |
 | AWS Bedrock | Claude, Llama, and more |
 | Azure / GCP Vertex | All hosted models |
 | Cerebras / Groq | Fast inference models |
@@ -186,7 +182,7 @@ const deployTool = createTool({
 
 const agent = new Agent({ tools: [deployTool], /* ... */ })
 ```
-...or use [MCP servers](https://github.com/modelcontextprotocol) to connect to databases, query APIs, manage cloud infrastructure, and interact with external systems. Use [community-built servers](https://github.com/modelcontextprotocol/servers) or ask Cline to create custom tools on the fly. In the CLI, manage servers with `cline mcp`.
+...or use [MCPs](https://github.com/modelcontextprotocol) to connect to databases, query APIs, manage cloud infrastructure, and interact with external systems. Use [community-built servers](https://github.com/modelcontextprotocol/servers) or ask Cline to create custom tools on the fly. In the CLI, manage servers with `cline mcp`.
 
 ## Multi-Agent Teams
 
@@ -212,8 +208,12 @@ cline schedule create "PR summary" \
 Chat with your agent from any messaging platform: Telegram, Slack, Discord, Google Chat, WhatsApp, and Linear. Each conversation thread maps to an agent session with full context. Set up access control to restrict who can interact with your agent.
 
 ```bash
+# Connect to Telegram
 cline connect telegram -k $BOT_TOKEN
-cline connect slack --token $SLACK_TOKEN --signing-secret $SECRET --base-url $URL
+# Connect to Slack through webhook
+cline connect slack --bot-token $SLACK_TOKEN --signing-secret $SECRET --base-url $URL
+# Connect to Slack using socket mode
+cline connect slack --bot-token $SLACK_TOKEN --app-token $SLACK_APP_TOKEN
 ```
 
 ## Headless CLI for CI/CD
@@ -222,7 +222,7 @@ Run Cline with zero interaction for scripting and automation. Pipe input, get JS
 
 ```bash
 cline "Run tests and fix any failures"
-git diff origin/main | cline  "Review these changes for issues"
+git diff origin/main | cline "Review these changes for issues"
 cline --json "List all TODO comments" | jq -r 'select(.type == "agent_event" and .event.text) | .event.text'
 ```
 

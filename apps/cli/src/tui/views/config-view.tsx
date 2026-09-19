@@ -1,3 +1,4 @@
+import { readGlobalSettings, setAutoUpdateEnabledGlobally } from "@cline/core";
 import { useTerminalDimensions } from "@opentui/react";
 import type { ChoiceContext } from "@opentui-ui/dialog";
 import { useDialogKeyboard } from "@opentui-ui/dialog/react";
@@ -15,20 +16,27 @@ import {
 import type { CliCompactionMode, Config } from "../../utils/types";
 import { getMcpManagerEntryStatus } from "../components/dialogs/mcp-manager-dialog";
 import { resolveModelDisplayName } from "../components/status-bar";
-import { getModeAccent, palette } from "../palette";
+import { useDialogPalette, useThemeController } from "../hooks/use-theme";
+import { type DialogPalette, getThemeDefinition } from "../themes";
 import {
 	type ConfigAction,
+	canDeleteConfigFooterRow,
 	canToggleConfigFooterRow,
 	getAdjacentConfigTab,
 	getConfigFooterText,
 	getConfigItemDisplayName,
+	getConfigPluginSections,
+	getConfigTabCountHeading,
 	getConfigTabs,
+	getPluginDiagnosticsLoadingText,
 	isInlineConfigAction,
 	isToggleableConfigItem,
 	resolveActiveConfigItems,
+	resolveConfigItemDeleteAction,
 	resolveConfigItemSelectAction,
 	resolveConfigItemToggleAction,
 	resolveInitialConfigTab,
+	shouldRenderConfigItemAsEnabled,
 	toTabLabel,
 } from "./config-view-helpers";
 
@@ -112,11 +120,13 @@ function getVisibleWindow<T>(
 	return { items: items.slice(start, end), startIndex: start };
 }
 
-const COMPACTION_MODE_COLORS: Record<CliCompactionMode, string> = {
-	agentic: palette.success,
-	basic: "yellow",
-	off: "gray",
-};
+function getCompactionModeColor(
+	mode: CliCompactionMode,
+	palette: DialogPalette,
+): string {
+	if (mode === "agentic") return palette.success;
+	return mode === "basic" ? "yellow" : "gray";
+}
 
 export interface ConfigPanelProps extends ChoiceContext<ConfigAction> {
 	config: Config;
@@ -130,6 +140,10 @@ export interface ConfigPanelProps extends ChoiceContext<ConfigAction> {
 	initialTab?: InteractiveConfigTab;
 	onActiveTabChange?: (tab: InteractiveConfigTab) => void;
 	onToggleConfigItem?: (
+		item: InteractiveConfigItem,
+		options?: LoadInteractiveConfigDataOptions,
+	) => Promise<InteractiveConfigData | undefined>;
+	onDeleteConfigItem?: (
 		item: InteractiveConfigItem,
 		options?: LoadInteractiveConfigDataOptions,
 	) => Promise<InteractiveConfigData | undefined>;
@@ -191,6 +205,7 @@ function appendToolGroupRows(
 			rightLabel: `${enabledCount}/${groupItems.length} tools enabled`,
 			indent: 2,
 		});
+
 		for (const item of sortBySourceThenName(groupItems)) {
 			rows.push({
 				kind: "ext",
@@ -238,15 +253,22 @@ function appendToolRows(
 		appendExtRows(rows, builtinTools);
 	}
 
-	const pluginGroups = groupToolItems(items.filter((item) => item.pluginName));
+	const pluginToolItems = items.filter((item) => item.pluginName);
+	const pluginGroups = groupToolItems(pluginToolItems);
 	if (pluginGroups.length > 0) {
 		rows.push({ kind: "head", label: "Plugins" });
 		appendToolGroupRows(
 			rows,
 			pluginGroups,
-			getSharedToolNames(items.filter((item) => item.pluginName)),
+			getSharedToolNames(pluginToolItems),
 		);
 	}
+}
+
+function hasPluginDiagnostics(data: InteractiveConfigData): boolean {
+	return (
+		data.pluginDiagnosticsLoaded || data.tools.some((item) => item.pluginName)
+	);
 }
 
 function appendSkillRows(
@@ -279,6 +301,16 @@ function appendSkillRows(
 	}
 }
 
+function appendPluginRows(
+	rows: ConfigRow[],
+	items: InteractiveConfigItem[],
+): void {
+	for (const section of getConfigPluginSections(items)) {
+		rows.push({ kind: "head", label: section.label });
+		appendExtRows(rows, section.items);
+	}
+}
+
 function withOptimisticToggle(
 	data: InteractiveConfigData,
 	item: InteractiveConfigItem,
@@ -298,11 +330,18 @@ function withOptimisticToggle(
 		).filter(Boolean),
 	);
 	const updateItems = (items: InteractiveConfigItem[]) =>
-		items.map((candidate) =>
-			matchesItem(candidate)
-				? { ...candidate, enabled: nextEnabled }
-				: candidate,
-		);
+		items.map((candidate) => {
+			if (matchesItem(candidate)) {
+				return { ...candidate, enabled: nextEnabled };
+			}
+			if (
+				item.kind === "plugin" &&
+				(candidate.path === item.path || candidate.pluginPath === item.path)
+			) {
+				return { ...candidate, enabled: nextEnabled };
+			}
+			return candidate;
+		});
 	const updateTools = (items: InteractiveConfigItem[]) =>
 		items.map((candidate) => {
 			if (matchesItem(candidate)) {
@@ -362,6 +401,9 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 	const [autoApprove, setAutoApprove] = useState(
 		config.toolPolicies["*"]?.autoApprove !== false,
 	);
+	const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(
+		() => readGlobalSettings().autoUpdateEnabled,
+	);
 	const [verbose, setVerbose] = useState(config.verbose);
 	const [compactionMode, setCompactionMode] = useState(
 		props.currentCompactionMode,
@@ -371,7 +413,7 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 	);
 	const [configData, setConfigData] = useState(props.configData);
 	const [pluginToolsLoaded, setPluginToolsLoaded] = useState(
-		props.configData.tools.some((item) => item.pluginName),
+		hasPluginDiagnostics(props.configData),
 	);
 	const [pluginToolsLoading, setPluginToolsLoading] = useState(false);
 	const [pluginToolsError, setPluginToolsError] = useState<
@@ -380,6 +422,10 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 	const [togglingItemId, setTogglingItemId] = useState<string | null>(null);
 	const [toggleError, setToggleError] = useState<string | undefined>();
 	const [navPos, setNavPos] = useState(0);
+	const themeController = useThemeController();
+	const palette = useDialogPalette();
+	const currentThemeLabel =
+		getThemeDefinition(themeController.selectedThemeId)?.label ?? "Auto";
 
 	const displayName = resolveModelDisplayName(config);
 
@@ -433,19 +479,24 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 			r.push({ kind: "provider" });
 			r.push({ kind: "model" });
 			r.push({ kind: "toggle", id: "mode", label: "Mode" });
+			r.push({ kind: "toggle", id: "theme", label: "Theme" });
 			r.push({ kind: "toggle", id: "compaction", label: "Compaction" });
 			r.push({
 				kind: "toggle",
 				id: "auto-approve",
 				label: "Auto-approve all",
 			});
+			r.push({ kind: "toggle", id: "auto-update", label: "Auto update" });
 			r.push({ kind: "toggle", id: "verbose", label: "Verbose" });
 		} else {
 			const activeItems = resolveActiveConfigItems(configData, activeTab);
-			r.push({
-				kind: "head",
-				label: `${toTabLabel(activeTab)} (${activeItems.length})`,
-			});
+			const countHeading = getConfigTabCountHeading(
+				activeTab,
+				activeItems.length,
+			);
+			if (countHeading) {
+				r.push({ kind: "head", label: countHeading });
+			}
 
 			if (activeItems.length === 0 && !pluginToolsLoading) {
 				r.push({
@@ -454,10 +505,11 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 				});
 			} else if (activeTab === "tools") {
 				appendToolRows(r, activeItems);
-				if (pluginToolsLoading) {
+				const loadingText = getPluginDiagnosticsLoadingText(activeTab);
+				if (pluginToolsLoading && loadingText) {
 					r.push({
 						kind: "detail",
-						text: "Loading plugin tools...",
+						text: loadingText,
 					});
 				}
 				if (pluginToolsError) {
@@ -468,6 +520,21 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 				}
 			} else if (activeTab === "skills") {
 				appendSkillRows(r, activeItems);
+			} else if (activeTab === "plugins") {
+				appendPluginRows(r, activeItems);
+				if (pluginToolsLoading) {
+					const loadingText = getPluginDiagnosticsLoadingText(activeTab);
+					r.push({
+						kind: "detail",
+						text: loadingText ?? "Loading plugin diagnostics...",
+					});
+				}
+				if (pluginToolsError) {
+					r.push({
+						kind: "detail",
+						text: pluginToolsError,
+					});
+				}
 			} else {
 				for (const item of activeItems) {
 					r.push({
@@ -485,18 +552,6 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 										lastError: item.loadError,
 									})
 								: getPluginLoadErrorLabel(item),
-					});
-				}
-				if (activeTab === "plugins" && pluginToolsLoading) {
-					r.push({
-						kind: "detail",
-						text: "Loading plugin diagnostics...",
-					});
-				}
-				if (activeTab === "plugins" && pluginToolsError) {
-					r.push({
-						kind: "detail",
-						text: pluginToolsError,
 					});
 				}
 			}
@@ -518,6 +573,9 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 	const selectedRowIdx = navIndices[clampedNavPos] ?? 0;
 	const selectedRow = rows[selectedRowIdx];
 	const canToggleSelectedRow = canToggleConfigFooterRow(selectedRow);
+	const canDeleteSelectedRow = Boolean(
+		props.onDeleteConfigItem && canDeleteConfigFooterRow(selectedRow),
+	);
 
 	const setNavPosition = (nextNavPos: number) => {
 		setNavPos(nextNavPos);
@@ -535,15 +593,13 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 			});
 			if (nextData) {
 				setConfigData(nextData);
-				setPluginToolsLoaded(nextData.tools.some((tool) => tool.pluginName));
+				setPluginToolsLoaded(hasPluginDiagnostics(nextData));
 			} else if (item.kind === "plugin" && loadConfigData) {
 				const refreshedData = await loadConfigData({
 					includePluginTools: true,
 				});
 				setConfigData(refreshedData);
-				setPluginToolsLoaded(
-					refreshedData.tools.some((tool) => tool.pluginName),
-				);
+				setPluginToolsLoaded(hasPluginDiagnostics(refreshedData));
 				setPluginToolsError(undefined);
 			}
 		} catch (error) {
@@ -571,9 +627,19 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 						setMode(mode === "plan" ? "act" : "plan");
 						props.onToggleMode();
 						break;
+					case "theme":
+						resolve({ kind: "open-theme" });
+						break;
 					case "auto-approve":
 						setAutoApprove(!autoApprove);
 						props.onToggleAutoApprove();
+						break;
+					case "auto-update":
+						setAutoUpdateEnabled((previous) => {
+							const next = !previous;
+							setAutoUpdateEnabledGlobally(next);
+							return next;
+						});
 						break;
 					case "compaction": {
 						const nextMode = getNextCliCompactionMode(compactionMode);
@@ -618,6 +684,20 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 		}
 	};
 
+	const handleDeleteSelected = () => {
+		if (!props.onDeleteConfigItem) {
+			return;
+		}
+		const row = rows[selectedRowIdx];
+		if (!row || row.kind !== "ext") {
+			return;
+		}
+		const action = resolveConfigItemDeleteAction(row.item);
+		if (action) {
+			resolve(action);
+		}
+	};
+
 	useDialogKeyboard((key) => {
 		if (key.name === "escape") {
 			dismiss();
@@ -648,6 +728,16 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 			handleToggleSelected();
 			return;
 		}
+		if (
+			key.name === "d" &&
+			!key.ctrl &&
+			!key.meta &&
+			!key.option &&
+			!key.shift
+		) {
+			handleDeleteSelected();
+			return;
+		}
 		if (key.name === "return" || key.name === "tab") {
 			handleSelect();
 		}
@@ -660,7 +750,7 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 
 	return (
 		<box flexDirection="column" paddingX={1}>
-			<text fg="cyan">
+			<text fg={palette.act}>
 				<strong>Settings</strong>
 			</text>
 
@@ -732,7 +822,7 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 								flexDirection="row"
 								justifyContent="space-between"
 							>
-								<text fg={isSel ? "cyan" : undefined}>{pfx}Provider</text>
+								<text fg={isSel ? palette.act : undefined}>{pfx}Provider</text>
 								<text fg="white">{props.providerDisplayName}</text>
 							</box>
 						);
@@ -743,7 +833,7 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 								flexDirection="row"
 								justifyContent="space-between"
 							>
-								<text fg={isSel ? "cyan" : undefined}>{pfx}Model</text>
+								<text fg={isSel ? palette.act : undefined}>{pfx}Model</text>
 								<text fg="white">{displayName}</text>
 							</box>
 						);
@@ -752,13 +842,19 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 						let valueColor: string;
 						if (row.id === "mode") {
 							value = mode === "plan" ? "Plan" : "Act";
-							valueColor = getModeAccent(mode);
+							valueColor = mode === "plan" ? palette.plan : palette.act;
+						} else if (row.id === "theme") {
+							value = currentThemeLabel;
+							valueColor = palette.act;
 						} else if (row.id === "auto-approve") {
 							value = autoApprove ? "● on" : "○ off";
 							valueColor = autoApprove ? palette.success : "gray";
+						} else if (row.id === "auto-update") {
+							value = autoUpdateEnabled ? "● on" : "○ off";
+							valueColor = autoUpdateEnabled ? palette.success : "gray";
 						} else if (row.id === "compaction") {
 							value = formatCliCompactionMode(compactionMode);
-							valueColor = COMPACTION_MODE_COLORS[compactionMode];
+							valueColor = getCompactionModeColor(compactionMode, palette);
 						} else {
 							value = verbose ? "● on" : "○ off";
 							valueColor = verbose ? palette.success : "gray";
@@ -769,7 +865,7 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 								flexDirection="row"
 								justifyContent="space-between"
 							>
-								<text fg={isSel ? "cyan" : undefined}>
+								<text fg={isSel ? palette.act : undefined}>
 									{pfx}
 									{row.label}
 								</text>
@@ -793,16 +889,15 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 											: "○ "
 								: "";
 						const rightLabel = row.rightLabel ?? "";
-						const toggleable = isToggleableConfigItem(row.item);
 						const prefix = " ".repeat(row.indent ?? 0);
 						const rowColor = row.item.loadError
 							? "red"
-							: toggleable && enabledState === "enabled"
+							: shouldRenderConfigItemAsEnabled(row.item, enabledState)
 								? palette.success
 								: enabledState === "partial"
 									? "yellow"
 									: isSel
-										? "cyan"
+										? palette.act
 										: "gray";
 						return (
 							<box
@@ -822,7 +917,7 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 					}
 					case "mcp-manager":
 						return (
-							<text key={absIdx} fg={isSel ? "cyan" : "gray"}>
+							<text key={absIdx} fg={isSel ? palette.act : "gray"}>
 								{pfx}Manage MCP Servers...
 							</text>
 						);
@@ -844,7 +939,10 @@ export function ConfigPanelContent(props: ConfigPanelProps) {
 				<em>
 					{togglingItemId
 						? "Applying settings"
-						: getConfigFooterText({ canToggle: canToggleSelectedRow })}
+						: getConfigFooterText({
+								canToggle: canToggleSelectedRow,
+								canDelete: canDeleteSelectedRow,
+							})}
 				</em>
 			</text>
 		</box>

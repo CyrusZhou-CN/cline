@@ -1,5 +1,17 @@
-import { isOpenAICodexCliProvider } from "../../../utils/codex-cli";
-import { isOAuthProvider } from "../../../utils/provider-auth";
+import type {
+	ChatModelModalities,
+	ModelModality,
+	ModelOperation,
+} from "@cline/shared";
+import { isChatProviderModel } from "../../../utils/chat-models";
+import type {
+	LocalCliStatus,
+	ProviderLocalCli,
+} from "../../../utils/local-cli";
+import {
+	isLocalAuthProvider,
+	isOAuthProvider,
+} from "../../../utils/provider-auth";
 
 export type OnboardingStep =
 	| "menu"
@@ -7,7 +19,8 @@ export type OnboardingStep =
 	| "device_code"
 	| "byo_provider"
 	| "byo_apikey"
-	| "codex_cli_setup"
+	| "local_cli_setup"
+	| "cline_pass_subscription"
 	| "cline_model"
 	| "model_picker"
 	| "custom_model_id"
@@ -29,11 +42,26 @@ export const THINKING_LEVELS: {
 	{ value: "xhigh", label: "Extra High", desc: "Maximum reasoning" },
 ];
 
+export const DEFAULT_THINKING_LEVEL_INDEX = THINKING_LEVELS.findIndex(
+	(l) => l.value === "medium",
+);
+
 export interface MenuOption {
 	label: string;
 	value: string;
 	detail: string;
 	icon: string;
+}
+
+export type ClinePassSubscriptionAction =
+	| "subscribe"
+	| "refresh"
+	| "skip"
+	| "back";
+
+export interface ClinePassSubscriptionOption {
+	value: ClinePassSubscriptionAction;
+	label: string;
 }
 
 export const MAIN_MENU: MenuOption[] = [
@@ -42,6 +70,12 @@ export const MAIN_MENU: MenuOption[] = [
 		value: "cline",
 		detail: "Latest models with regular free promos",
 		icon: "\u263a",
+	},
+	{
+		label: "Sign in with ClinePass",
+		value: "cline-pass",
+		detail: "Low cost subscription for everyone",
+		icon: "\u2726",
 	},
 	{
 		label: "Sign in with ChatGPT",
@@ -54,6 +88,62 @@ export const MAIN_MENU: MenuOption[] = [
 		value: "byo",
 		detail: "API key or local server (e.g. Ollama)",
 		icon: "\u26b7",
+	},
+];
+
+/**
+ * Which setup flow a provider needs. Keyed off how the provider authenticates,
+ * so every caller routes the same way.
+ */
+export type ProviderSetupRoute = "oauth" | "local_cli" | "api_key";
+
+export function resolveProviderSetupRoute(
+	providerId: string,
+): ProviderSetupRoute {
+	if (isOAuthProvider(providerId)) return "oauth";
+	if (isLocalAuthProvider(providerId)) return "local_cli";
+	return "api_key";
+}
+
+/**
+ * Whether the local-CLI setup screen lets the user connect.
+ */
+export function canContinueLocalCliSetup(
+	_cli: ProviderLocalCli | undefined,
+	_status: LocalCliStatus | undefined,
+): boolean {
+	// The probe only looks on PATH, while the runtime also accepts an explicit
+	// pathToClaudeCodeExecutable and a bundled platform binary, and Codex falls
+	// back through `npx`. A PATH miss therefore means "not on PATH", not
+	// "unusable", so the screen reports it without blocking — a provider that
+	// really cannot start says so on the first turn, in its own words.
+	return true;
+}
+
+export function getMainMenuOptions(options?: {
+	isClinePassEnabled?: boolean;
+}): MenuOption[] {
+	return MAIN_MENU.filter(
+		(option) => option.value !== "cline-pass" || options?.isClinePassEnabled,
+	);
+}
+
+export const CLINE_PASS_SUBSCRIPTION_OPTIONS: ClinePassSubscriptionOption[] = [
+	{
+		value: "subscribe",
+		label: "Subscribe to ClinePass",
+	},
+	{
+		value: "refresh",
+		label: "Re-check subscription status",
+	},
+	{
+		value: "skip",
+		label: "Skip for now",
+	},
+	{
+		value: "back",
+		label: "Go back",
 	},
 ];
 
@@ -82,6 +172,12 @@ export interface ModelEntry {
 	supportsReasoning: boolean;
 }
 
+export type ClinePassSubscriptionStatus =
+	| "loading"
+	| "subscribed"
+	| "unsubscribed"
+	| "error";
+
 export interface ProviderCatalogItem {
 	id: string;
 	name: string;
@@ -96,11 +192,16 @@ export interface ProviderModelItem {
 	id: string;
 	name?: string;
 	supportsReasoning?: boolean;
+	operation?: ModelOperation;
+	inputModalities?: ModelModality[];
+	outputModalities?: ModelModality[];
 }
 
 export interface KnownModelInfo {
 	name?: string;
 	capabilities?: string[];
+	operation?: ModelOperation;
+	modalities?: ChatModelModalities;
 }
 
 export function toProviderEntry(provider: ProviderCatalogItem): ProviderEntry {
@@ -108,7 +209,7 @@ export function toProviderEntry(provider: ProviderCatalogItem): ProviderEntry {
 		id: provider.id,
 		name: provider.name,
 		isOAuth: isOAuthProvider(provider.id),
-		isLocalAuth: isOpenAICodexCliProvider(provider.id),
+		isLocalAuth: isLocalAuthProvider(provider.id),
 		hasAuth:
 			Boolean(provider.apiKey) || provider.oauthAccessTokenPresent === true,
 		...(provider.capabilities ? { capabilities: provider.capabilities } : {}),
@@ -130,6 +231,13 @@ export function toModelEntriesFromKnownModels(
 ): ModelEntry[] {
 	if (!knownModels) return [];
 	return Object.entries(knownModels)
+		.filter(([, info]) =>
+			isChatProviderModel({
+				operation: info.operation,
+				inputModalities: info.modalities?.input,
+				outputModalities: info.modalities?.output,
+			}),
+		)
 		.map(([id, info]) => ({
 			id,
 			name: info.name || id,
@@ -139,6 +247,9 @@ export function toModelEntriesFromKnownModels(
 }
 
 export function getOAuthProviderLabel(providerId: string): string {
+	if (providerId === "cline-pass") {
+		return "ClinePass";
+	}
 	if (providerId === "cline") {
 		return "Cline";
 	}
@@ -146,4 +257,9 @@ export function getOAuthProviderLabel(providerId: string): string {
 		return "ChatGPT";
 	}
 	return providerId;
+}
+
+export function shouldUseFeaturedClineModelPicker(providerId: string): boolean {
+	// ClinePass uses the featured picker too, with Subscribed/Free sections
+	return providerId === "cline" || providerId === "cline-pass";
 }

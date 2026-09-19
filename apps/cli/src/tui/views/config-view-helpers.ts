@@ -8,7 +8,9 @@ import { isToggleableInteractiveConfigItem } from "../../tui/interactive-config"
 export type ConfigAction =
 	| { kind: "open-provider" }
 	| { kind: "open-model" }
+	| { kind: "open-theme" }
 	| { kind: "toggle-item"; item: InteractiveConfigItem }
+	| { kind: "delete-item"; item: InteractiveConfigItem }
 	| {
 			kind: "ext-detail";
 			item: InteractiveConfigItem;
@@ -126,8 +128,61 @@ export function resolveActiveConfigItems(
 	}
 }
 
+export interface ConfigPluginSection {
+	label: string;
+	items: InteractiveConfigItem[];
+}
+
+export function getConfigPluginSections(
+	items: readonly InteractiveConfigItem[],
+): ConfigPluginSection[] {
+	const clinePlugins = items.filter((item) => item.agentPlugin !== true);
+	const agentPlugins = items.filter((item) => item.agentPlugin === true);
+	return [
+		...(clinePlugins.length > 0
+			? [
+					{
+						label: `Cline Plugins (${clinePlugins.length})`,
+						items: clinePlugins,
+					},
+				]
+			: []),
+		...(agentPlugins.length > 0
+			? [
+					{
+						label: `Agent Plugins (${agentPlugins.length})`,
+						items: agentPlugins,
+					},
+				]
+			: []),
+	];
+}
+
+export function getConfigTabCountHeading(
+	tab: InteractiveConfigTab,
+	itemCount: number,
+): string | undefined {
+	return tab === "plugins" ? undefined : `${toTabLabel(tab)} (${itemCount})`;
+}
+
+export function shouldRenderConfigItemAsEnabled(
+	item: InteractiveConfigItem,
+	enabledState: "enabled" | "disabled" | "partial",
+): boolean {
+	return (
+		enabledState === "enabled" &&
+		(isToggleableInteractiveConfigItem(item) || item.agentPlugin === true)
+	);
+}
+
 export function isToggleableConfigItem(item: InteractiveConfigItem): boolean {
 	return isToggleableInteractiveConfigItem(item);
+}
+
+export function isDeletableConfigItem(item: InteractiveConfigItem): boolean {
+	return (
+		item.deletable ?? (item.kind === "plugin" && item.agentPlugin !== true)
+	);
 }
 
 export function resolveConfigItemSelectAction(
@@ -154,6 +209,15 @@ export function resolveConfigItemToggleAction(
 		return undefined;
 	}
 	return { kind: "toggle-item", item };
+}
+
+export function resolveConfigItemDeleteAction(
+	item: InteractiveConfigItem,
+): ConfigAction | undefined {
+	if (!isDeletableConfigItem(item)) {
+		return undefined;
+	}
+	return { kind: "delete-item", item };
 }
 
 export function isInlineConfigAction(
@@ -183,16 +247,47 @@ export function canToggleConfigFooterRow(
 	);
 }
 
+export function canDeleteConfigFooterRow(
+	row:
+		| { kind: "ext"; item: InteractiveConfigItem }
+		| { kind: string }
+		| undefined,
+): boolean {
+	return (
+		row?.kind === "ext" && "item" in row && isDeletableConfigItem(row.item)
+	);
+}
+
 export function getConfigFooterText({
 	canToggle = false,
+	canDelete = false,
 }: {
 	canToggle?: boolean;
+	canDelete?: boolean;
 } = {}): string {
-	return canToggle
-		? "←/→ switch tabs, ↑/↓ navigate, Tab/Enter select, Space toggle, Esc close"
-		: "←/→ switch tabs, ↑/↓ navigate, Tab/Enter select, Esc close";
+	const actions = ["←/→ switch tabs", "↑/↓ navigate", "Tab/Enter select"];
+	if (canToggle) {
+		actions.push("Space toggle");
+	}
+	if (canDelete) {
+		actions.push("D delete");
+	}
+	actions.push("Esc close");
+	return actions.join(", ");
 }
 
 export function getConfigItemDisplayName(name: string): string {
 	return name;
+}
+
+export function getPluginDiagnosticsLoadingText(
+	tab: InteractiveConfigTab,
+): string | undefined {
+	if (tab === "tools") {
+		return "Loading plugin tools...";
+	}
+	if (tab === "plugins") {
+		return "Loading plugin diagnostics...";
+	}
+	return undefined;
 }

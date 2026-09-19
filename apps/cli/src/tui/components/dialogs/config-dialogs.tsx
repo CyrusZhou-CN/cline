@@ -1,12 +1,12 @@
 import type { ChoiceContext } from "@opentui-ui/dialog";
 import { useDialogKeyboard } from "@opentui-ui/dialog/react";
 import { useState } from "react";
+import { useDialogPalette } from "../../hooks/use-theme";
 import type {
 	InteractiveConfigData,
 	InteractiveConfigItem,
 	LoadInteractiveConfigDataOptions,
 } from "../../interactive-config";
-import { palette } from "../../palette";
 import {
 	getExtDetailFooterText,
 	getExtDetailRows,
@@ -23,6 +23,7 @@ export function ExtDetailContent(
 		) => Promise<InteractiveConfigData | undefined>;
 	},
 ) {
+	const palette = useDialogPalette();
 	const [item, setItem] = useState(props.item);
 	const [toggleError, setToggleError] = useState<string | undefined>();
 
@@ -90,7 +91,7 @@ export function ExtDetailContent(
 								flexDirection="row"
 								justifyContent="space-between"
 							>
-								<text fg="cyan">
+								<text fg={palette.act}>
 									<strong>{row.name}</strong>
 								</text>
 								<text
@@ -134,6 +135,57 @@ export function ExtDetailContent(
 					{toggleError}
 				</text>
 			)}
+		</box>
+	);
+}
+
+export function DeleteConfigItemConfirmContent(
+	props: ChoiceContext<boolean> & {
+		item: InteractiveConfigItem;
+	},
+) {
+	useDialogKeyboard((key) => {
+		if (key.name === "return" || key.name === "y") {
+			props.resolve(true);
+		} else if (key.name === "escape" || key.name === "n") {
+			props.dismiss();
+		}
+	}, props.dialogId);
+
+	return (
+		<box flexDirection="column" paddingX={1}>
+			<text>Delete plugin {props.item.name}?</text>
+			<text fg="gray" marginTop={1}>
+				This removes the installed plugin files from {props.item.path}.
+			</text>
+			<text fg="gray" marginTop={1}>
+				<em>Y/Enter to confirm, N/Esc to cancel</em>
+			</text>
+		</box>
+	);
+}
+
+export function ConfigErrorContent(
+	props: ChoiceContext<void> & {
+		title: string;
+		message: string;
+	},
+) {
+	useDialogKeyboard((key) => {
+		if (key.name === "return" || key.name === "escape") {
+			props.dismiss();
+		}
+	}, props.dialogId);
+
+	return (
+		<box flexDirection="column" paddingX={1}>
+			<text fg="red">{props.title}</text>
+			<text fg="gray" marginTop={1}>
+				{props.message}
+			</text>
+			<text fg="gray" marginTop={1}>
+				<em>Enter/Esc to close</em>
+			</text>
 		</box>
 	);
 }

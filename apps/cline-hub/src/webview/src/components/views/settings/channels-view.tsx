@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
 	Select,
 	SelectContent,
@@ -35,6 +34,12 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { desktopClient } from "@/lib/desktop-client";
 import { cn } from "@/lib/utils";
+import {
+	CommandBadge,
+	PageEmptyState,
+	PageFrame,
+	PageHeader,
+} from "../page-layout";
 
 type ConnectorField = {
 	flag: string;
@@ -42,6 +47,13 @@ type ConnectorField = {
 	placeholder?: string;
 	required?: boolean;
 	help?: string[];
+	initialValue?: string;
+	options?: Array<{ value: string; label: string; hint?: string }>;
+	includeWhen?: {
+		flag: string;
+		equals?: string;
+		notEquals?: string;
+	};
 };
 
 type ConnectorSecurityField = {
@@ -55,7 +67,7 @@ type ConnectorSecurityField = {
 type ConnectorChannel = {
 	id: string;
 	name: string;
-	type: "polling" | "webhook";
+	type: "polling" | "webhook" | "hybrid";
 	hint: string;
 	fields: ConnectorField[];
 	security?: {
@@ -76,6 +88,7 @@ type ActiveConnector = {
 	phoneNumberId?: string;
 	port?: number;
 	baseUrl?: string;
+	connectionMode?: string;
 };
 
 type ConnectorChannelsResponse = {
@@ -142,10 +155,41 @@ function isMultilineField(field: ConnectorField): boolean {
 	return label.includes("json") || field.flag.includes("credentials");
 }
 
+function shouldIncludeField(
+	field: ConnectorField,
+	values: Record<string, string>,
+): boolean {
+	const condition = field.includeWhen;
+	if (!condition) {
+		return true;
+	}
+	const value = values[condition.flag] ?? "";
+	if (condition.equals !== undefined && value !== condition.equals) {
+		return false;
+	}
+	if (condition.notEquals !== undefined && value === condition.notEquals) {
+		return false;
+	}
+	return true;
+}
+
+function initialValuesForChannel(
+	channel?: ConnectorChannel,
+): Record<string, string> {
+	const values: Record<string, string> = {};
+	for (const field of channel?.fields ?? []) {
+		if (field.initialValue) {
+			values[field.flag] = field.initialValue;
+		}
+	}
+	return values;
+}
+
 function createFormState(channels: ConnectorChannel[]): ConnectorFormState {
+	const channel = channels[0];
 	return {
-		channelId: channels[0]?.id ?? "",
-		values: {},
+		channelId: channel?.id ?? "",
+		values: initialValuesForChannel(channel),
 		securityEnabled: false,
 		securityValues: {},
 	};
@@ -175,6 +219,15 @@ export function ChannelsContent() {
 		() => channels.find((channel) => channel.id === formState.channelId),
 		[channels, formState.channelId],
 	);
+	const visibleFields = useMemo(() => {
+		const values = {
+			...initialValuesForChannel(selectedChannel),
+			...formState.values,
+		};
+		return (selectedChannel?.fields ?? []).filter((field) =>
+			shouldIncludeField(field, values),
+		);
+	}, [selectedChannel, formState.values]);
 
 	const applyResponse = useCallback((response: ConnectorChannelsResponse) => {
 		setChannels(response.available);
@@ -233,6 +286,9 @@ export function ChannelsContent() {
 			return;
 		}
 		for (const field of selectedChannel.fields) {
+			if (!visibleFields.includes(field)) {
+				continue;
+			}
 			if (field.required && !formState.values[field.flag]?.trim()) {
 				setFormError(`${field.label} is required`);
 				return;
@@ -290,16 +346,13 @@ export function ChannelsContent() {
 	};
 
 	return (
-		<ScrollArea className="h-full">
-			<div className="mx-auto flex max-w-5xl flex-col gap-6 p-6">
-				<div className="flex items-center justify-between gap-3">
-					<div>
-						<h2 className="text-lg font-semibold">Channels</h2>
-						<p className="text-sm text-muted-foreground">
-							{activeConnectors.length} connected
-						</p>
-					</div>
-					<div className="flex items-center gap-2">
+		<PageFrame>
+			<PageHeader
+				description={`${activeConnectors.length} connected. Start and manage connector channels for Cline Hub.`}
+				title="Channels"
+				meta={<CommandBadge>cline connect</CommandBadge>}
+				actions={
+					<>
 						<Button
 							disabled={isLoading}
 							onClick={() => void refreshChannels()}
@@ -320,80 +373,81 @@ export function ChannelsContent() {
 							<Plus className="size-4" />
 							Add Channel
 						</Button>
-					</div>
+					</>
+				}
+			/>
+
+			{errorMessage ? (
+				<div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+					{errorMessage}
 				</div>
+			) : null}
 
-				{errorMessage ? (
-					<div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-						{errorMessage}
-					</div>
-				) : null}
-
+			{isLoading ? (
+				<PageEmptyState>Loading channels...</PageEmptyState>
+			) : activeConnectors.length === 0 ? (
+				<PageEmptyState>No channels connected.</PageEmptyState>
+			) : (
 				<section className="overflow-hidden rounded-lg border bg-card">
 					<div className="grid gap-2 p-2.5">
-						{isLoading ? (
-							<p className="px-1 py-4 text-[13px] text-muted-foreground">
-								Loading channels...
-							</p>
-						) : activeConnectors.length === 0 ? (
-							<p className="px-1 py-4 text-[13px] text-muted-foreground">
-								No channels connected.
-							</p>
-						) : (
-							activeConnectors.map((connector) => (
-								<div
-									className="grid gap-3 border bg-[color-mix(in_oklch,var(--background)_70%,var(--card))] p-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center"
-									key={connector.id}
-								>
-									<div className="min-w-0">
-										<div className="flex items-center gap-2">
-											<Circle className="size-2 fill-emerald-300 text-emerald-300" />
-											<p className="truncate text-[13px] font-semibold leading-tight">
-												{connectorName(connector, channels)}
-											</p>
-											<span className="rounded-md border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground">
-												{connectorIdentity(connector)}
-											</span>
-										</div>
-										<div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
-											<span className="rounded-md border bg-background px-1.5 py-0.5">
-												pid={connector.pid}
-											</span>
+						{activeConnectors.map((connector) => (
+							<div
+								className="grid gap-3 border bg-[color-mix(in_oklch,var(--background)_70%,var(--card))] p-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center"
+								key={connector.id}
+							>
+								<div className="min-w-0">
+									<div className="flex items-center gap-2">
+										<Circle className="size-2 fill-emerald-300 text-emerald-300" />
+										<p className="truncate text-[13px] font-semibold leading-tight">
+											{connectorName(connector, channels)}
+										</p>
+										<span className="rounded-md border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground">
+											{connectorIdentity(connector)}
+										</span>
+									</div>
+									<div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
+										<span className="rounded-md border bg-background px-1.5 py-0.5">
+											pid={connector.pid}
+										</span>
+										<span
+											className="max-w-full break-all rounded-md border bg-background px-1.5 py-0.5"
+											title={connector.hubUrl}
+										>
+											{connector.hubUrl}
+										</span>
+										{connector.baseUrl ? (
 											<span
 												className="max-w-full break-all rounded-md border bg-background px-1.5 py-0.5"
-												title={connector.hubUrl}
+												title={connector.baseUrl}
 											>
-												{connector.hubUrl}
+												{connector.baseUrl}
 											</span>
-											{connector.baseUrl ? (
-												<span
-													className="max-w-full break-all rounded-md border bg-background px-1.5 py-0.5"
-													title={connector.baseUrl}
-												>
-													{connector.baseUrl}
-												</span>
-											) : null}
+										) : null}
+										<span className="rounded-md border bg-background px-1.5 py-0.5">
+											{formatDateTime(connector.startedAt)}
+										</span>
+										{connector.connectionMode ? (
 											<span className="rounded-md border bg-background px-1.5 py-0.5">
-												{formatDateTime(connector.startedAt)}
+												{connector.connectionMode}
 											</span>
-										</div>
+										) : null}
 									</div>
-									<Button
-										disabled={busyChannel === connector.type}
-										onClick={() => setRemoveTarget(connector)}
-										size="sm"
-										type="button"
-										variant="outline"
-									>
-										<Trash2 className="size-4" />
-										Remove...
-									</Button>
 								</div>
-							))
-						)}
+								<Button
+									disabled={busyChannel === connector.type}
+									onClick={() => setRemoveTarget(connector)}
+									size="sm"
+									type="button"
+									variant="outline"
+								>
+									<Trash2 className="size-4" />
+									Remove...
+								</Button>
+							</div>
+						))}
 					</div>
 				</section>
-			</div>
+			)}
 
 			<Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
 				<DialogContent className="max-h-[86vh] overflow-y-auto sm:max-w-xl">
@@ -413,7 +467,9 @@ export function ChannelsContent() {
 									}
 									setFormState({
 										channelId: value,
-										values: {},
+										values: initialValuesForChannel(
+											channels.find((channel) => channel.id === value),
+										),
 										securityEnabled: false,
 										securityValues: {},
 									});
@@ -433,7 +489,7 @@ export function ChannelsContent() {
 							</Select>
 						</div>
 
-						{selectedChannel?.fields.map((field) => (
+						{visibleFields.map((field) => (
 							<div className="grid gap-2" key={field.flag}>
 								<Label>
 									{field.label}
@@ -441,7 +497,29 @@ export function ChannelsContent() {
 										<span className="text-destructive"> *</span>
 									) : null}
 								</Label>
-								{isMultilineField(field) ? (
+								{field.options ? (
+									<Select
+										onValueChange={(value) => {
+											if (value) {
+												updateFieldValue(field.flag, value);
+											}
+										}}
+										value={
+											formState.values[field.flag] ?? field.initialValue ?? ""
+										}
+									>
+										<SelectTrigger>
+											<SelectValue placeholder={field.placeholder} />
+										</SelectTrigger>
+										<SelectContent>
+											{field.options.map((option) => (
+												<SelectItem key={option.value} value={option.value}>
+													{option.label}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								) : isMultilineField(field) ? (
 									<Textarea
 										onChange={(event) =>
 											updateFieldValue(field.flag, event.target.value)
@@ -559,6 +637,6 @@ export function ChannelsContent() {
 					</AlertDialogFooter>
 				</AlertDialogContent>
 			</AlertDialog>
-		</ScrollArea>
+		</PageFrame>
 	);
 }
