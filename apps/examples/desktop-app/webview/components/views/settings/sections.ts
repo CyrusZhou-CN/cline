@@ -7,13 +7,15 @@
 
 const ALL_SETTINGS_SECTIONS = [
 	"General",
-	"API Providers",
+	"Providers",
 	"Voice",
 	"Channels",
 	"Schedules",
 	"Import",
 	"Remote",
 	"Account",
+	"Debug",
+	"About",
 ] as const;
 
 // Customize is the unified hub for everything that extends Cline — skills,
