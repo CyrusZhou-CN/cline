@@ -14,6 +14,7 @@ const importCheck = `
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+	Button, IconButton, Badge,
 	AgentConversationHeader,
 	AgentConversationLayout,
 	AgentSessionContent,
@@ -21,6 +22,7 @@ import {
 	AgentChangesPanel,
 	AgentPullRequestBar,
 	AgentCommandOutput,
+	AgentUxVerification,
 	AgentImageLightboxContent,
 	AgentAskQuestion,
 	AgentContextUsage,
@@ -66,6 +68,8 @@ if (
 	throw new Error("packed message-scroller exports are missing");
 }
 
+if (typeof AgentUxVerification !== "function") throw new Error("packed UX verifier export is missing");
+
 for (const specifier of [
 	"@cline/ui/components.css",
 	"@cline/ui/components/markdown.css",
@@ -79,7 +83,15 @@ for (const specifier of [
 }
 
 const packageJsonUrl = import.meta.resolve("@cline/ui/package.json");
-for (const name of ["agent-changes", "agent-pull-request-bar"]) {
+for (const control of [Button, IconButton, Badge]) {
+ if (!control) throw new Error("packed shared control export is missing");
+}
+const componentStyles = readFileSync(new URL("./components.css", packageJsonUrl), "utf8");
+if (!existsSync(fileURLToPath(new URL("./components/button.css", packageJsonUrl))) || !componentStyles.includes("./components/button.css")) {
+ throw new Error("packed button stylesheet is missing");
+}
+
+for (const name of ["agent-changes", "agent-pull-request-bar", "agent-ux-verification"]) {
 	if (!existsSync(fileURLToPath(new URL("./components/" + name + ".css", packageJsonUrl)))) {
 		throw new Error("packed review UI stylesheet is missing: " + name);
 	}
@@ -189,11 +201,34 @@ async function run(command: string[], cwd: string): Promise<void> {
 	}
 }
 
-function createConsumer(root: string): void {
+async function pack(cwd: string, destination: string): Promise<string> {
+	mkdirSync(destination, { recursive: true });
+	await run(
+		[
+			process.execPath,
+			"pm",
+			"pack",
+			"--ignore-scripts",
+			"--destination",
+			destination,
+		],
+		cwd,
+	);
+	const archiveName = readdirSync(destination).find((name) =>
+		name.endsWith(".tgz"),
+	);
+	if (!archiveName) throw new Error("bun pm pack did not create an archive");
+	return join(destination, archiveName);
+}
+
+function createConsumer(
+	root: string,
+	overrides: Record<string, string> = {},
+): void {
 	mkdirSync(root, { recursive: true });
 	writeFileSync(
 		join(root, "package.json"),
-		`${JSON.stringify({ name: "cline-ui-smoke", private: true, type: "module" }, null, 2)}\n`,
+		`${JSON.stringify({ name: "cline-ui-smoke", private: true, type: "module", overrides }, null, 2)}\n`,
 	);
 }
 
@@ -202,7 +237,16 @@ async function verifyDiffDeclarations(root: string): Promise<void> {
 	writeFileSync(
 		consumer,
 		`import { ToolFileDiff } from "@cline/ui/components/agent-chat/tool-diff";
-import type { ComponentProps } from "react";
+import { createElement, createRef, type ComponentProps } from "react";
+import { Badge, Button, IconButton, Switch, type BadgeProps, type InteractiveBadgeProps } from "@cline/ui";
+interface LegacyBadgeWrapperProps extends BadgeProps { hint?: string }
+const spanProps: LegacyBadgeWrapperProps = { title: "Status", onClick(event) { event.currentTarget.dataset.clicked = "true"; } };
+const buttonBadge: InteractiveBadgeProps = { interactive: true, onClick(event) { event.currentTarget.disabled = true; } };
+createElement(Badge, { ...spanProps, ref: createRef<HTMLSpanElement>() });
+createElement(Badge, { ...buttonBadge, ref: createRef<HTMLButtonElement>() });
+createElement(Button, { variant: "fill", asChild: true });
+createElement(IconButton, { "aria-label": "Close", variant: "surface", children: "X" });
+createElement(Switch, { tone: "neutral", ref: createRef<HTMLInputElement>() });
 const options: NonNullable<ComponentProps<typeof ToolFileDiff>["options"]> = {
 	diffStyle: "split",
 };
@@ -294,7 +338,7 @@ async function verifyTailwindContract(
 		"leading-none",
 		"max-h-44",
 		"not-last:border-b",
-		"focus-visible:outline-3",
+		"focus-visible:outline-2",
 		"min-h-8",
 		"resize-none",
 		"backdrop-blur-sm",
@@ -330,7 +374,7 @@ async function verifyTailwindContract(
 		"border-style:solid",
 		"font-family:inherit",
 		"margin:.5rem 0 0",
-		"padding-block:0",
+		"padding:0",
 	]) {
 		expectFragment(noPreflightCss, fragment, "no-Preflight Tailwind contract");
 	}
@@ -347,6 +391,11 @@ async function verifyTailwindContract(
 		expectFragment(output, ".cline-ui-switch__track", "packed switch CSS");
 		expectFragment(
 			output,
+			"--cline-ui-control-height:",
+			"packed control sizing tokens",
+		);
+		expectFragment(
+			output,
 			".cline-ui-switch__input:checked",
 			"packed switch states",
 		);
@@ -356,36 +405,26 @@ async function verifyTailwindContract(
 const temporaryRoot = mkdtempSync(join(tmpdir(), "cline-ui-package-"));
 
 try {
-	let archive = process.argv[2] ? resolve(process.argv[2]) : undefined;
-	if (!archive) {
-		const packDirectory = join(temporaryRoot, "pack");
-		mkdirSync(packDirectory, { recursive: true });
-		await run(
-			[
-				process.execPath,
-				"pm",
-				"pack",
-				"--ignore-scripts",
-				"--destination",
-				packDirectory,
-			],
-			packageRoot,
-		);
-		const archiveName = readdirSync(packDirectory).find((name) =>
-			name.endsWith(".tgz"),
-		);
-		if (!archiveName) throw new Error("bun pm pack did not create an archive");
-		archive = join(packDirectory, archiveName);
-	}
+	const archive = process.argv[2]
+		? resolve(process.argv[2])
+		: await pack(packageRoot, join(temporaryRoot, "pack"));
+	// The packed UI pins @cline/shared to the workspace version, which is not on
+	// the registry yet during a release, so both consumers install the local pack.
+	// npm dedupes onto it directly; Bun needs an override to resolve it.
+	const sharedArchive = await pack(
+		join(packageRoot, "../shared"),
+		join(temporaryRoot, "shared-pack"),
+	);
 
 	const bunConsumer = join(temporaryRoot, "bun-consumer");
-	createConsumer(bunConsumer);
+	createConsumer(bunConsumer, { "@cline/shared": `file:${sharedArchive}` });
 	await run(
 		[
 			process.execPath,
 			"add",
 			"--ignore-scripts",
 			archive,
+			sharedArchive,
 			"react@19.2.4",
 			"react-dom@19.2.4",
 			"@pierre/diffs@1.4.0",
@@ -405,6 +444,7 @@ try {
 		"tailwindcss",
 	]);
 
+	// The workspace uses Bun, but published consumers must also install via npm.
 	const npmConsumer = join(temporaryRoot, "npm-consumer");
 	createConsumer(npmConsumer);
 	await run(
@@ -415,6 +455,7 @@ try {
 			"--no-audit",
 			"--no-fund",
 			archive,
+			sharedArchive,
 			"react@18.3.1",
 			"react-dom@18.3.1",
 			"@pierre/diffs@1.3.2",

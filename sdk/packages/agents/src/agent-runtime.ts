@@ -216,11 +216,21 @@ function resolveRuntimeConfig(
 function resolveToolPolicy(
 	toolName: string,
 	policies: BaseAgentRuntimeConfig["toolPolicies"],
+	dependencies: readonly string[] = [],
 ): ToolPolicy {
-	return {
+	const policy = {
 		...(policies?.["*"] ?? {}),
 		...(policies?.[toolName] ?? {}),
 	};
+	for (const name of dependencies) {
+		const dependency = {
+			...policies?.["*"],
+			...policies?.[name],
+		};
+		if (dependency.enabled === false) policy.enabled = false;
+		if (dependency.autoApprove === false) policy.autoApprove = false;
+	}
+	return policy;
 }
 
 interface PendingToolAssembly {
@@ -399,7 +409,10 @@ function sanitizeHookAttribute(value: string): string {
  */
 type HookContextOrigin =
 	| { source: "RunStart" }
-	| { source: "PreToolUse" | "PostToolUse"; toolCall: AgentToolCallPart };
+	| {
+			source: "PreToolUse" | "PostToolUse" | "ToolSuccess";
+			toolCall: AgentToolCallPart;
+	  };
 
 function formatHookContextBlock(
 	origin: HookContextOrigin,
@@ -1283,9 +1296,11 @@ export class AgentRuntime {
 	 * True when a turn failed with a transient provider error that a retry
 	 * could plausibly recover, and the failed attempt left nothing behind that
 	 * a second stream would duplicate or repeat:
-	 * - no content at all (text, reasoning, media, or local tool calls): those
+	 * - no content beyond reasoning (text, media, or local tool calls): those
 	 *   deltas were already emitted to the UI and there is no event to retract
-	 *   them, so re-streaming would show the output twice;
+	 *   them, so re-streaming would show the output twice. Partial reasoning is
+	 *   tolerated: it is discarded with the failed message, and losing a long
+	 *   thinking phase to a dropped connection is worse than re-streaming it;
 	 * - no provider-executed tool activity (recorded in message metadata, not
 	 *   content): re-issuing the request could run those side effects again;
 	 * - not an auth or context-window failure, which the same request cannot fix.
@@ -1297,7 +1312,7 @@ export class AgentRuntime {
 		if (turn.finishReason !== "error") {
 			return false;
 		}
-		if (turn.message.content.length > 0) {
+		if (turn.message.content.some((part) => part.type !== "reasoning")) {
 			return false;
 		}
 		const modelToolActivities = turn.message.metadata?.modelToolActivities;
@@ -2486,7 +2501,11 @@ export class AgentRuntime {
 
 		if (tool && !skipReason) {
 			const policy = {
-				...resolveToolPolicy(toolCall.toolName, this.config.toolPolicies),
+				...resolveToolPolicy(
+					toolCall.toolName,
+					this.config.toolPolicies,
+					tool.policyDependencies,
+				),
 				...policyOverride,
 			};
 			if (policy.enabled === false) {
@@ -2555,6 +2574,9 @@ export class AgentRuntime {
 	private async executePreparedTool(
 		prepared: PreparedToolExecution,
 	): Promise<AgentMessage> {
+		// A parallel sibling can outlive a stopped run; pushing to the buffer
+		// captured here keeps its context out of whichever run is current then.
+		const hookContexts = this.pendingHookContexts;
 		const startedAt = new Date();
 		await this.emit({
 			type: "tool-started",
@@ -2623,7 +2645,7 @@ export class AgentRuntime {
 					durationMs,
 				})) as AgentAfterToolResult | undefined;
 				if (after?.appendContext?.trim()) {
-					this.pendingHookContexts.push(
+					hookContexts.push(
 						formatHookContextBlock(
 							{ source: "PostToolUse", toolCall: prepared.toolCall },
 							after.appendContext,
@@ -2635,6 +2657,19 @@ export class AgentRuntime {
 					result = after.result;
 				}
 			}
+		}
+
+		if (
+			!prepared.skipReason &&
+			!result.isError &&
+			prepared.tool?.successContext?.trim()
+		) {
+			hookContexts.push(
+				formatHookContextBlock(
+					{ source: "ToolSuccess", toolCall: prepared.toolCall },
+					prepared.tool.successContext,
+				),
+			);
 		}
 
 		const message = createMessage("tool", [
